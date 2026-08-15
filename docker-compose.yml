@@ -1,0 +1,96 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-realestate}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-realestate}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-devpassword}@db:5432/${POSTGRES_DB:-realestate}
+      REDIS_URL: redis://redis:6379/0
+      GEOCODING_PROVIDER: ${GEOCODING_PROVIDER:-nominatim}
+      YANDEX_GEOCODING_API_KEY: ${YANDEX_GEOCODING_API_KEY:-}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      # Accept connections from frontend container and Replit proxy
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5000,http://localhost:3000}
+      IQR_MULTIPLIER: ${IQR_MULTIPLIER:-1.5}
+      PIPELINE_REFRESH_INTERVAL_HOURS: ${PIPELINE_REFRESH_INTERVAL_HOURS:-4}
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-devpassword}@db:5432/${POSTGRES_DB:-realestate}
+      REDIS_URL: redis://redis:6379/0
+      GEOCODING_PROVIDER: ${GEOCODING_PROVIDER:-mock}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      IQR_MULTIPLIER: ${IQR_MULTIPLIER:-1.5}
+      PIPELINE_REFRESH_INTERVAL_HOURS: ${PIPELINE_REFRESH_INTERVAL_HOURS:-4}
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    volumes:
+      - ./frontend:/app
+      # Anonymous volume prevents host node_modules from overriding container's
+      - /app/node_modules
+      - /app/.next
+    ports:
+      # Map container 3000 → host 5000 (Replit webview port)
+      - "5000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
