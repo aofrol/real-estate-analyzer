@@ -1,0 +1,149 @@
+Мы создаём MVP v1.0 проекта «ОценитьКвартиру.рф» — онлайн-сервиса автоматизированной оценки рыночной стоимости квартир по адресу и параметрам.
+
+Сейчас требуется ТОЛЬКО спроектировать детальный план реализации. Код пока НЕ писать.
+
+## Цель MVP v1.0
+
+Пользователь:
+
+1. вводит адрес квартиры;
+2. указывает площадь, количество комнат и этаж;
+3. система геокодирует адрес;
+4. получает актуальные объявления недвижимости из подключенных источников;
+5. нормализует данные;
+6. удаляет дубли;
+7. выбирает сопоставимые объекты;
+8. рассчитывает ориентировочную рыночную стоимость;
+9. показывает диапазон стоимости, среднюю/медианную цену, цену за м², количество предложений и список источников.
+
+## Архитектура
+
+Предварительно планируется:
+
+* Frontend: Next.js + TypeScript
+* UI: Tailwind CSS
+* Backend: Python 3.12 + FastAPI
+* Database: PostgreSQL + PostGIS
+* ORM: SQLAlchemy
+* Migrations: Alembic
+* Background jobs: Redis + Celery
+* External data sources: отдельные Source Adapters
+* Deployment: Docker Compose
+* Production: Linux VPS
+
+## Основные backend-модули
+
+* Address / Geocoding Engine
+* Source Adapter Layer
+* Raw Listings Collector
+* Listing Normalizer
+* Deduplication Engine
+* Comparable Engine
+* Valuation Engine
+* Valuation API
+* Background Jobs
+
+## Основные сущности БД
+
+Предусмотреть как минимум:
+
+* sources
+* raw_listings
+* buildings
+* properties
+* listings
+* search_requests
+* valuation_results
+* valuation_comparables
+* listing_price_history
+
+Использовать PostGIS для координат и географических запросов.
+
+## Comparable Engine
+
+Предусмотреть алгоритм сопоставления объектов по:
+
+* географической близости;
+* площади;
+* количеству комнат;
+* этажу;
+* характеристикам здания;
+* другим доступным параметрам.
+
+Должен рассчитываться similarity score.
+
+## Valuation Engine
+
+Предусмотреть:
+
+* median price;
+* mean price;
+* min/max;
+* P25/P50/P75;
+* price per square meter;
+* weighted valuation;
+* confidence / quality score;
+* количество использованных comparable objects.
+
+Архитектура должна позволять в дальнейшем совершенствовать математическую модель без переписывания остальных модулей.
+
+## Критически важно
+
+НЕ добавлять в MVP v1.0:
+
+* LLM;
+* ChatGPT;
+* AI explanation;
+* генеративный AI;
+* chatbot;
+* авторизацию пользователей;
+* личный кабинет;
+* платежи;
+* подписки;
+* CRM;
+* мобильное приложение;
+* сложную карту;
+* Kubernetes;
+* микросервисную архитектуру;
+* сложную систему ролей.
+
+Не пытаться реализовать все источники недвижимости одновременно.
+
+Источники должны подключаться через единый Source Adapter Interface.
+
+Не реализовывать обход CAPTCHA, антибот-защиты или других технических ограничений источников. Для каждого источника предусмотреть заменяемый адаптер и возможность использования разрешённого API, feed или другого легального способа получения данных.
+
+## Главный архитектурный принцип
+
+Сначала спроектировать систему как модульный монолит.
+
+Не создавать premature microservices.
+
+Frontend, FastAPI backend, workers, PostgreSQL и Redis должны работать через Docker Compose.
+
+## Требования к плану
+
+Сформируй:
+
+1. архитектуру системы;
+2. структуру директорий;
+3. схему БД;
+4. API endpoints;
+5. модели данных;
+6. интерфейсы Source Adapter;
+7. алгоритм Comparable Engine;
+8. алгоритм Valuation Engine;
+9. background jobs;
+10. Docker architecture;
+11. environment variables;
+12. testing strategy;
+13. security requirements;
+14. logging and error handling;
+15. development milestones;
+16. acceptance criteria для каждого модуля.
+
+План должен быть рассчитан на solo developer, который не является профессиональным программистом и использует Replit Agent для разработки.
+
+Не изменяй стек и архитектурные принципы без явного обоснования.
+
+После подготовки плана НЕ начинай реализацию автоматически.
