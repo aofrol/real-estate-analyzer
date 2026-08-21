@@ -6,19 +6,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .source import Source
 
 
-class RawListing(Base):
+class RawListing(UUIDPkMixin, Base):
     """
     Буфер сырых данных из источников.
     Хранит оригинальный JSON-payload нетронутым.
@@ -28,11 +27,6 @@ class RawListing(Base):
 
     __tablename__ = "raw_listings"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     source_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         # FK1: RESTRICT — нельзя удалить источник, имеющий собранные данные.

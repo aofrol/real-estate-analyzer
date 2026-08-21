@@ -6,20 +6,19 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Numeric, SmallInteger, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .building import Building
     from .listing import Listing
 
 
-class Property(Base):
+class Property(UUIDPkMixin, Base):
     """
     Конкретная квартира/юнит внутри здания: этаж, количество комнат, площади.
     Промежуточный слой между зданием (Building) и объявлением (Listing).
@@ -33,11 +32,6 @@ class Property(Base):
 
     __tablename__ = "properties"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     building_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         # FK2: RESTRICT — нельзя удалить здание с квартирами.

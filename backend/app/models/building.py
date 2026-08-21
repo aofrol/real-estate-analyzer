@@ -3,23 +3,20 @@ Building — нормализованный физический объект н
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
 from geoalchemy2 import Geography
 from sqlalchemy import DateTime, Index, SmallInteger, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .property import Property
 
 
-class Building(Base):
+class Building(UUIDPkMixin, Base):
     """
     Нормализованные физические объекты недвижимости (дома).
     Несколько объявлений из разных источников могут ссылаться на один building.
@@ -30,11 +27,6 @@ class Building(Base):
 
     __tablename__ = "buildings"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     address_raw: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -62,8 +54,10 @@ class Building(Base):
     )
     # geography(Point, 4326): нативные метры в ST_DWithin / ST_Distance.
     # Nullable: геокодирование может не дать результата.
+    # spatial_index=False: explicit GiST index defined below in __table_args__
+    # to avoid the duplicate auto-index GeoAlchemy2 would otherwise create.
     location: Mapped[Any | None] = mapped_column(
-        Geography(geometry_type="POINT", srid=4326),
+        Geography(geometry_type="POINT", srid=4326, spatial_index=False),
         nullable=True,
         comment=(
             "Координаты здания (PostGIS geography, WGS84). "
@@ -91,7 +85,9 @@ class Building(Base):
 
     # ── Indexes ────────────────────────────────────────────────────────────────
     __table_args__ = (
-        # GiST index on geography column; ST_DWithin uses metres natively.
+        # Explicit GiST index on geography column; ST_DWithin uses metres natively.
+        # spatial_index=False on the column prevents GeoAlchemy2 from creating
+        # a duplicate auto-index alongside this one.
         Index("ix_buildings_location", "location", postgresql_using="gist"),
         Index("ix_buildings_city", "city"),
     )

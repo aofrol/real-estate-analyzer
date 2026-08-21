@@ -6,20 +6,19 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Double, ForeignKey, Index, Integer, String, func, text
+from sqlalchemy import BigInteger, DateTime, Double, ForeignKey, Index, Integer, String, desc, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .search_request import SearchRequest
     from .valuation_comparable import ValuationComparable
 
 
-class ValuationResult(Base):
+class ValuationResult(UUIDPkMixin, Base):
     """
     Результат оценки: набор статистик в kopecks, версия алгоритма и параметры запуска.
     Привязан к одному SearchRequest. Immutable snapshot на момент вычисления.
@@ -34,11 +33,6 @@ class ValuationResult(Base):
 
     __tablename__ = "valuation_results"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     search_request_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         # FK7: RESTRICT — запрос нужен для Celery refresh; удаление заблокировано результатом.
@@ -146,6 +140,6 @@ class ValuationResult(Base):
     __table_args__ = (
         # FK lookup: загрузка всех результатов по запросу.
         Index("ix_valuation_results_search_request_id", "search_request_id"),
-        # Получение последней оценки по запросу.
-        Index("ix_valuation_results_computed_at", "computed_at"),
+        # Получение последней оценки по запросу (ORDER BY computed_at DESC).
+        Index("ix_valuation_results_computed_at", desc("computed_at")),
     )

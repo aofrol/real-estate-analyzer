@@ -6,19 +6,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, desc, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .listing import Listing
 
 
-class ListingPriceHistory(Base):
+class ListingPriceHistory(UUIDPkMixin, Base):
     """
     Хронология изменений цены для конкретного объявления.
     Создаётся при каждом обновлении asking_price.
@@ -29,11 +28,6 @@ class ListingPriceHistory(Base):
 
     __tablename__ = "listing_price_history"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     listing_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         # FK6: CASCADE — история без объявления лишена смысла.
@@ -61,6 +55,11 @@ class ListingPriceHistory(Base):
 
     # ── Indexes ────────────────────────────────────────────────────────────────
     __table_args__ = (
-        # Composite: хронологический ряд цен для конкретного объявления.
-        Index("ix_listing_price_history_listing_recorded", "listing_id", "recorded_at"),
+        # Composite: хронологический ряд цен — listing_id equality + recorded_at DESC
+        # для запросов ORDER BY recorded_at DESC (последние изменения цены первыми).
+        Index(
+            "ix_listing_price_history_listing_recorded",
+            "listing_id",
+            desc("recorded_at"),
+        ),
     )

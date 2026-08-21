@@ -3,22 +3,20 @@ SearchRequest — параметры пользовательского запр
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
-from sqlalchemy import DateTime, Double, Index, Numeric, SmallInteger, Text, func, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import DateTime, Double, Index, Numeric, SmallInteger, Text, desc, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .valuation_result import ValuationResult
 
 
-class SearchRequest(Base):
+class SearchRequest(UUIDPkMixin, Base):
     """
     Параметры каждого пользовательского запроса оценки.
     Служит anchor для Valuation Result и источником адресов для Celery refresh.
@@ -28,11 +26,6 @@ class SearchRequest(Base):
 
     __tablename__ = "search_requests"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     address_raw: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -90,5 +83,5 @@ class SearchRequest(Base):
     # ── Indexes ────────────────────────────────────────────────────────────────
     __table_args__ = (
         # Celery refresh: выбор недавних локаций (ORDER BY created_at DESC LIMIT N).
-        Index("ix_search_requests_created_at", "created_at"),
+        Index("ix_search_requests_created_at", desc("created_at")),
     )

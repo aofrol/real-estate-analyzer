@@ -9,20 +9,19 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from sqlalchemy import BigInteger, DateTime, Double, ForeignKey, Index, Integer, Numeric, SmallInteger, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .listing import Listing
     from .valuation_result import ValuationResult
 
 
-class ValuationComparable(Base):
+class ValuationComparable(UUIDPkMixin, Base):
     """
     Объявления, использованные в конкретной оценке.
 
@@ -36,11 +35,6 @@ class ValuationComparable(Base):
 
     __tablename__ = "valuation_comparables"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     valuation_result_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         # FK8: CASCADE — comparables без результата оценки бессмысленны.

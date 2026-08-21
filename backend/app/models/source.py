@@ -3,23 +3,21 @@ Source — реестр источников данных (сайтов-агре
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Index, String, Text, func, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Boolean, DateTime, Index, String, Text, UniqueConstraint, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .listing import Listing
     from .raw_listing import RawListing
 
 
-class Source(Base):
+class Source(UUIDPkMixin, Base):
     """
     Реестр источников данных. Каждый Source Adapter регистрируется здесь.
     Служит точкой конфигурации и audit trail происхождения объявлений.
@@ -27,15 +25,9 @@ class Source(Base):
 
     __tablename__ = "sources"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     name: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
-        unique=True,
         comment="Человекочитаемое имя источника (уникальное)",
     )
     base_url: Mapped[str | None] = mapped_column(
@@ -82,7 +74,9 @@ class Source(Base):
         back_populates="source",
     )
 
-    # ── Indexes ────────────────────────────────────────────────────────────────
+    # ── Constraints & Indexes ──────────────────────────────────────────────────
     __table_args__ = (
+        # Named UniqueConstraint consistent with project naming convention.
+        UniqueConstraint("name", name="uq_sources_name"),
         Index("ix_sources_is_active", "is_active"),
     )

@@ -6,7 +6,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
 from geoalchemy2 import Geography
 from sqlalchemy import (
@@ -23,7 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base
+from .base import Base, UUIDPkMixin
 
 if TYPE_CHECKING:
     from .listing_price_history import ListingPriceHistory
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
     from .valuation_comparable import ValuationComparable
 
 
-class Listing(Base):
+class Listing(UUIDPkMixin, Base):
     """
     Центральная таблица: объявление о продаже/аренде.
 
@@ -47,11 +46,6 @@ class Listing(Base):
 
     __tablename__ = "listings"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,
-    )
     property_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         # FK3: RESTRICT — нельзя удалить квартиру с объявлениями.
@@ -108,8 +102,10 @@ class Listing(Base):
     )
     # geography(Point, 4326): нативные метры в ST_DWithin / ST_Distance.
     # Nullable: геокодирование может не дать результата.
+    # spatial_index=False: partial GiST index defined below in __table_args__
+    # to avoid the duplicate full auto-index GeoAlchemy2 would otherwise create.
     location: Mapped[Any | None] = mapped_column(
-        Geography(geometry_type="POINT", srid=4326),
+        Geography(geometry_type="POINT", srid=4326, spatial_index=False),
         nullable=True,
         comment=(
             "Координаты объявления (PostGIS geography, WGS84). "
@@ -179,7 +175,7 @@ class Listing(Base):
         UniqueConstraint("source_id", "external_id", name="uq_listings_source_external"),
         # Partial GiST на geography: покрывает ядро запроса ComparableEngine.
         # ST_DWithin(location, target, radius_m) работает в метрах.
-        # Объединяет пространственный фильтр с бизнес-условиями в одном индексе.
+        # spatial_index=False на колонке предотвращает дублирующий полный auto-index.
         Index(
             "ix_listings_location_active",
             "location",
