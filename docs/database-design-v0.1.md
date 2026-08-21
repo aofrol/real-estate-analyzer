@@ -50,7 +50,7 @@ erDiagram
         int year_built
         int floors_total
         varchar building_type
-        geometry location
+        geography location
         timestamptz created_at
         timestamptz updated_at
     }
@@ -86,7 +86,7 @@ erDiagram
         varchar status
         timestamptz listed_at
         timestamptz removed_at
-        geometry location
+        geography location
         uuid duplicate_of_id FK
         jsonb extra
         timestamptz created_at
@@ -113,6 +113,8 @@ erDiagram
     valuation_results {
         uuid id PK
         uuid search_request_id FK
+        varchar algorithm_version
+        jsonb parameters
         bigint median_asking_price
         bigint mean_asking_price
         bigint min_asking_price
@@ -131,8 +133,17 @@ erDiagram
         uuid id PK
         uuid valuation_result_id FK
         uuid listing_id FK
+        int rank
+        float weight
         float similarity_score
         float distance_m
+        bigint asking_price_snapshot
+        bigint asking_price_per_sqm_snapshot
+        numeric area_total_snapshot
+        smallint rooms_snapshot
+        smallint floor_snapshot
+        varchar building_type_snapshot
+        uuid source_id_snapshot
         timestamptz created_at
     }
 
@@ -160,8 +171,8 @@ erDiagram
 | `listings` | Центральная таблица: объявление о продаже/аренде. Содержит цену, статус, ссылку на источник и свойство. Дубликаты помечаются `duplicate_of_id`, но не удаляются. |
 | `listing_price_history` | Хронология изменений цены для конкретного объявления. Создаётся при каждом обновлении `asking_price`. |
 | `search_requests` | Параметры каждого пользовательского запроса оценки. Служит как anchor для Valuation Result и как список адресов для периодического Celery-refresh. |
-| `valuation_results` | Результат оценки: набор статистик в kopecks. Привязан к одному `search_request`. Snapshot на момент вычисления. |
-| `valuation_comparables` | Объявления, использованные в конкретной оценке, с индивидуальными оценками схожести. Обеспечивает воспроизводимость и аудитность оценки. |
+| `valuation_results` | Результат оценки: набор статистик в kopecks, версия алгоритма и параметры запуска. Привязан к одному `search_request`. Immutable snapshot на момент вычисления. |
+| `valuation_comparables` | Объявления, использованные в конкретной оценке, с индивидуальными рангами, весами и snapshot-значениями полей на момент оценки. Обеспечивает полную воспроизводимость и аудитность расчёта. |
 
 ---
 
@@ -190,7 +201,7 @@ erDiagram
 |------|-----|------|---------|-----------|
 | `id` | `UUID` | NOT NULL | `gen_random_uuid()` | PK |
 | `address_raw` | `TEXT` | NOT NULL | — | Оригинальный адрес, как пришёл из источника |
-| `address_normalized` | `TEXT` | NULL | — | Нормализованный адрес после геокодирования |
+| `address_normalized` | `TEXT` | NULL | — | Нормализованный адрес после геокодирования; используется как первичный ключ идентичности здания при поиске дублей |
 | `city` | `VARCHAR(100)` | NULL | — | Город |
 | `district` | `VARCHAR(200)` | NULL | — | Район/округ |
 | `street` | `VARCHAR(200)` | NULL | — | Улица |
@@ -199,7 +210,7 @@ erDiagram
 | `year_built` | `SMALLINT` | NULL | — | Год постройки |
 | `floors_total` | `SMALLINT` | NULL | — | Количество этажей в доме |
 | `building_type` | `VARCHAR(20)` | NULL | — | Тип дома: `panel`, `brick`, `monolith`, `other` — enum или CHECK |
-| `location` | `geometry(Point, 4326)` | NULL | — | Координаты здания (PostGIS); nullable: геокодирование может не дать результата |
+| `location` | `geography(Point, 4326)` | NULL | — | Координаты здания (PostGIS geography, WGS84); nullable: геокодирование может не дать результата. Порядок координат: `ST_MakePoint(longitude, latitude)`. `ST_DWithin` и `ST_Distance` работают в метрах. |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | `now()` | |
 | `updated_at` | `TIMESTAMPTZ` | NOT NULL | `now()` | |
 
@@ -253,7 +264,7 @@ erDiagram
 | `status` | `VARCHAR(10)` | NOT NULL | `'active'` | Состояние объявления: `active`, `sold`, `removed` |
 | `listed_at` | `TIMESTAMPTZ` | NULL | — | Дата публикации объявления (по данным источника) |
 | `removed_at` | `TIMESTAMPTZ` | NULL | — | Дата снятия объявления (NULL, если ещё активно) |
-| `location` | `geometry(Point, 4326)` | NULL | — | Координаты объявления (может отличаться от `buildings.location`) |
+| `location` | `geography(Point, 4326)` | NULL | — | Координаты объявления (PostGIS geography, WGS84); может отличаться от `buildings.location`. Порядок: `ST_MakePoint(longitude, latitude)`. |
 | `duplicate_of_id` | `UUID` | NULL | — | FK → `listings.id`; указывает на каноническое объявление. NULL = не дубликат. |
 | `extra` | `JSONB` | NULL | `'{}'` | Дополнительные атрибуты, специфичные для источника |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | `now()` | |
@@ -291,12 +302,15 @@ erDiagram
 
 ### `valuation_results`
 
-> Все денежные поля — **BIGINT в kopecks**. `source_count` не хранится — вычисляется на лету через `COUNT(DISTINCT source_id)` по `valuation_comparables → listings`.
+> Все денежные поля — **BIGINT в kopecks**. Таблица immutable: строка не изменяется после вставки.  
+> `source_count` не хранится — вычисляется на лету через `COUNT(DISTINCT source_id)` по `valuation_comparables → listings`.
 
 | Поле | Тип | NULL | Default | Назначение |
 |------|-----|------|---------|-----------|
 | `id` | `UUID` | NOT NULL | `gen_random_uuid()` | PK |
 | `search_request_id` | `UUID` | NOT NULL | — | FK → `search_requests.id` |
+| `algorithm_version` | `VARCHAR(50)` | NOT NULL | — | Версия алгоритма оценки, напр. `'v1.0'`. Обязательна для аудита и различения результатов, полученных разными версиями логики. |
+| `parameters` | `JSONB` | NOT NULL | `'{}'` | Параметры конкретного запуска оценки: `radius_m`, `iqr_multiplier`, `max_comparables`, веса компонентов и другие влияющие настройки. Позволяет воспроизвести расчёт независимо от текущих env-переменных. |
 | `median_asking_price` | `BIGINT` | NOT NULL | — | Медианная цена по comparables, kopecks |
 | `mean_asking_price` | `BIGINT` | NOT NULL | — | Средняя цена, kopecks |
 | `min_asking_price` | `BIGINT` | NOT NULL | — | Минимальная цена, kopecks (вторичная статистика) |
@@ -315,14 +329,30 @@ erDiagram
 
 ### `valuation_comparables`
 
+> **Snapshot-таблица.** Snapshot-поля (`_snapshot`) фиксируют значения объявления **на момент оценки** и не зависят от последующих изменений `listings`.  
+> FK `listing_id` сохраняется для audit/lineage, но расчёт опирается исключительно на snapshot-поля.  
+> Строки **никогда не изменяются** после вставки.  
+> Все денежные snapshot-поля — **BIGINT в kopecks**; площадь — `NUMERIC(8,2)` в м²; расстояние — метры.
+
 | Поле | Тип | NULL | Default | Назначение |
 |------|-----|------|---------|-----------|
 | `id` | `UUID` | NOT NULL | `gen_random_uuid()` | PK |
 | `valuation_result_id` | `UUID` | NOT NULL | — | FK → `valuation_results.id` |
-| `listing_id` | `UUID` | NOT NULL | — | FK → `listings.id`; ссылка на объявление в момент оценки |
-| `similarity_score` | `DOUBLE PRECISION` | NOT NULL | — | Взвешенный score схожести, 0.0–1.0 |
-| `distance_m` | `DOUBLE PRECISION` | NULL | — | Расстояние до объекта оценки, метры |
+| `listing_id` | `UUID` | NOT NULL | — | FK → `listings.id`; ссылка для audit/lineage. Расчёт не зависит от состояния строки `listings` после оценки. |
+| `rank` | `INTEGER` | NOT NULL | — | Порядковый номер comparable в наборе, отсортированном по `similarity_score DESC`. Первый по схожести = 1. |
+| `weight` | `DOUBLE PRECISION` | NOT NULL | — | Вес comparable в расчёте `weighted_asking_price`. Сумма весов по всему `valuation_result_id` = 1.0. |
+| `similarity_score` | `DOUBLE PRECISION` | NOT NULL | — | Итоговый взвешенный score схожести, 0.0–1.0 |
+| `distance_m` | `DOUBLE PRECISION` | NOT NULL | — | Расстояние от comparable до объекта оценки, метры. Компонент `similarity_score` и отображается пользователю. |
+| `asking_price_snapshot` | `BIGINT` | NOT NULL | — | `listings.asking_price` на момент оценки, kopecks |
+| `asking_price_per_sqm_snapshot` | `BIGINT` | NOT NULL | — | `listings.asking_price_per_sqm` на момент оценки, kopecks. Ключевое поле: IQR-фильтр и weighted median опираются на него. |
+| `area_total_snapshot` | `NUMERIC(8,2)` | NOT NULL | — | `properties.area_total` на момент оценки, м² |
+| `rooms_snapshot` | `SMALLINT` | NOT NULL | — | `properties.rooms` на момент оценки |
+| `floor_snapshot` | `SMALLINT` | NULL | — | `properties.floor` на момент оценки; NULL если не указан |
+| `building_type_snapshot` | `VARCHAR(20)` | NULL | — | `buildings.building_type` на момент оценки; NULL если не определён |
+| `source_id_snapshot` | `UUID` | NOT NULL | — | `listings.source_id` на момент оценки; идентифицирует происхождение comparable без JOIN |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | `now()` | |
+
+> **Расширяемость:** если в будущих версиях алгоритма потребуются дополнительные признаки comparable (напр., `floor_ratio`, `area_delta`), их следует добавить как отдельные NOT NULL поля или единый `feature_snapshot JSONB` — в зависимости от частоты запросов. Произвольные признаки, не участвующие в MVP-алгоритме, не включены.
 
 ---
 
@@ -356,7 +386,7 @@ erDiagram
 | FK6 | `listing_price_history.listing_id` → `listings.id` | `CASCADE` | `CASCADE` | История цены без объявления лишена смысла; но т.к. listings не удаляются, CASCADE носит защитный характер |
 | FK7 | `valuation_results.search_request_id` → `search_requests.id` | `RESTRICT` | `CASCADE` | Поисковый запрос нужен для Celery refresh; удаление заблокировано наличием результата |
 | FK8 | `valuation_comparables.valuation_result_id` → `valuation_results.id` | `CASCADE` | `CASCADE` | Comparables без результата оценки бессмысленны; каскадное удаление при очистке |
-| FK9 | `valuation_comparables.listing_id` → `listings.id` | `RESTRICT` | `CASCADE` | Нельзя удалить объявление, использованное в оценке |
+| FK9 | `valuation_comparables.listing_id` → `listings.id` | `RESTRICT` | `CASCADE` | Нельзя удалить объявление, использованное в оценке; snapshot-поля хранят значения независимо от FK |
 
 > `RESTRICT` означает «отказать в удалении, если существуют зависимые строки».  
 > `ON UPDATE CASCADE` на UUID-PK практически никогда не срабатывает, но задаётся для полноты.
@@ -380,7 +410,7 @@ erDiagram
 | Индекс | Тип | Поля | Назначение |
 |--------|-----|------|-----------|
 | PK | BTREE | `id` | Auto |
-| IDX_GEO | GIST | `location` | Spatial queries в ComparableEngine (`ST_DWithin`, `ST_Distance`) |
+| IDX_GEO | GiST | `location` | Spatial queries на типе `geography`; `ST_DWithin` и `ST_Distance` возвращают метры без cast. Используется ComparableEngine при поиске здания-аналога. |
 | IDX | BTREE | `city` | Фильтрация по городу при поиске похожих зданий |
 
 ### `raw_listings`
@@ -401,13 +431,12 @@ erDiagram
 
 ### `listings`
 
-| Индекс | Тип | Поля | Назначение |
-|--------|-----|------|-----------|
+| Индекс | Тип | Поля / Условие | Назначение |
+|--------|-----|----------------|-----------|
 | PK | BTREE | `id` | Auto |
 | UQ | BTREE | `(source_id, external_id)` | Каноническая идентичность объявления внутри источника |
-| IDX_GEO | GIST | `location` | Spatial lookup в ComparableEngine (`ST_DWithin` для радиуса поиска) |
-| IDX_STATUS | BTREE | `status` | Фильтрация активных объявлений |
-| PARTIAL | BTREE | `id WHERE duplicate_of_id IS NULL` | Partial index: только неудалённые и неповторяющиеся — именно этот набор запрашивает ComparableEngine |
+| IDX_GEO | GiST | `location` WHERE `duplicate_of_id IS NULL AND status = 'active'` | **Partial GiST** на типе `geography`: покрывает ядро запроса ComparableEngine. `ST_DWithin(location, target, radius_m)` работает в метрах. Объединяет пространственный фильтр с фильтром по дублям и статусу в одном индексе. |
+| IDX_STATUS | BTREE | `status` | Фильтрация активных объявлений в non-spatial запросах |
 | IDX | BTREE | `listed_at` | Сортировка по дате; Celery refresh выбирает недавние |
 | IDX | BTREE | `property_id` | FK lookup |
 | IDX | BTREE | `duplicate_of_id` WHERE NOT NULL | Поиск всех дубликатов конкретного объявления |
@@ -440,33 +469,55 @@ erDiagram
 |--------|-----|------|-----------|
 | PK | BTREE | `id` | Auto |
 | IDX | BTREE | `valuation_result_id` | FK lookup; загрузка всех comparables оценки |
+| IDX | BTREE | `(valuation_result_id, rank)` | Composite: получение comparables в порядке ранга для отображения |
 | IDX | BTREE | `listing_id` | Проверка: в каких оценках использовалось объявление (audit) |
 
 ---
 
 ## 7. PostGIS — детали использования
 
+### Выбранный тип: `geography(Point, 4326)`
+
+Для пространственных точек, участвующих в поиске и расчёте расстояний, используется тип **`geography(Point, 4326)`** (WGS84).
+
+**Обоснование выбора:**
+- `geography` принимает расстояния в **метрах** нативно: `ST_DWithin(a, b, 500)` означает ровно 500 метров без дополнительных приведений типов.
+- Исключает класс ошибок, при котором `ST_DWithin` на `geometry(4326)` принимал бы аргумент в градусах (≈ 111 км за единицу), возвращая молча неверные результаты.
+- Для городских запросов с радиусом до 50 км разница в производительности между `geometry` и `geography` незначительна.
+- GiST-индексы на `geography` поддерживаются PostgreSQL/PostGIS полностью.
+
+**Порядок координат:** `ST_MakePoint(longitude, latitude)` — долгота первая, широта вторая. Применяется при любом создании точки из результатов геокодирования.
+
 ### Геометрические поля
 
 | Таблица | Поле | Тип | SRID | Nullable | Назначение |
 |---------|------|-----|------|----------|-----------|
-| `buildings` | `location` | `geometry(Point, 4326)` | 4326 (WGS84) | ДА | Координаты здания, результат геокодирования адреса |
-| `listings` | `location` | `geometry(Point, 4326)` | 4326 (WGS84) | ДА | Координаты объявления (может быть точнее, чем здание) |
-
-**Почему `geometry`, а не `geography`** — предмет Decision Checklist (п. 10). Краткое обоснование: `geometry` быстрее при индексировании, `geography` точнее для больших расстояний. Для городских запросов (< 10 км) разница пренебрежима.
-
-**Почему SRID 4326 (WGS84):** стандарт GPS / веб-картографии; Nominatim и Yandex Geocoder возвращают lat/lon именно в этой системе. Не требует перепроецирования при сохранении.
+| `buildings` | `location` | `geography(Point, 4326)` | 4326 (WGS84) | ДА | Координаты здания, результат геокодирования адреса |
+| `listings` | `location` | `geography(Point, 4326)` | 4326 (WGS84) | ДА | Координаты объявления (может быть точнее, чем здание) |
 
 **Nullable:** геокодирование может завершиться неудачей (адрес не найден, внешний сервис недоступен). Система должна корректно работать с объявлением без координат, исключая его из spatial-запросов ComparableEngine.
 
+**Почему SRID 4326 (WGS84):** стандарт GPS / веб-картографии; Nominatim и Yandex Geocoder возвращают lat/lon именно в этой системе. Не требует перепроецирования при сохранении.
+
+### GiST-индексы на geography-полях
+
+GiST-индексы создаются непосредственно на колонках типа `geography`. PostGIS поддерживает GiST для `geography` без дополнительных операторных классов.
+
+Для `listings.location` применяется **partial GiST-индекс**, объединяющий пространственный фильтр с бизнес-условиями (см. раздел 6, `listings`):
+```
+USING GiST (location) WHERE duplicate_of_id IS NULL AND status = 'active'
+```
+
 ### Spatial queries (планируемые)
 
-| Запрос | Функция PostGIS | Применение |
-|--------|----------------|-----------|
-| Radius filter | `ST_DWithin(location, target_point, radius_meters)` | ComparableEngine: выбор объявлений в радиусе от целевого адреса |
-| Distance calculation | `ST_Distance(location, target_point)` | Компонент similarity score; значение в `valuation_comparables.distance_m` |
-| Point creation | `ST_MakePoint(lon, lat)::geometry` | Создание точки из результата геокодирования |
-| SRID set | `ST_SetSRID(point, 4326)` | Явная привязка к WGS84 при вставке |
+| Запрос | Функция PostGIS | Единицы | Применение |
+|--------|----------------|---------|-----------|
+| Radius filter | `ST_DWithin(location, target_point, radius_meters)` | **метры** | ComparableEngine: выбор объявлений в радиусе от целевого адреса |
+| Distance calculation | `ST_Distance(location, target_point)` | **метры** | Компонент similarity score; значение в `valuation_comparables.distance_m` |
+| Point creation | `ST_MakePoint(lon, lat)::geography` | — | Создание geography-точки из результата геокодирования (долгота первая) |
+| SRID set | Не требуется отдельно | — | `geography(Point, 4326)` хранит SRID имплицитно; при необходимости: `ST_SetSRID(ST_MakePoint(lon, lat), 4326)::geography` |
+
+> Для `geography` **не требуется** приведение типа при передаче радиуса в метрах — `ST_DWithin(a::geography, b::geography, 500)` является правильным вызовом, но если оба аргумента уже типа `geography`, cast избыточен.
 
 ### `CREATE EXTENSION`
 
@@ -496,7 +547,7 @@ erDiagram
 ┌──────────────┐    ┌────────────────┐
 │  buildings   │←───│  properties    │
 │  (location   │    │  (building_id, │
-│   geometry)  │    │   rooms, area) │
+│   geography) │    │   rooms, area) │
 └──────────────┘    └───────┬────────┘
                             │
                             ▼
@@ -504,7 +555,7 @@ erDiagram
 │  listings                                                   │
 │  (asking_price BIGINT kopecks,                             │
 │   asking_price_per_sqm BIGINT kopecks,                     │
-│   status, location geometry,                               │
+│   status, location geography,                              │
 │   duplicate_of_id — NULL = канонический)                   │
 └──────┬──────────────────────────┬──────────────────────────┘
        │                          │
@@ -516,26 +567,35 @@ erDiagram
        │
        │ ComparableEngine запрашивает:
        │ WHERE duplicate_of_id IS NULL AND status = 'active'
-       │   AND ST_DWithin(location, target, radius)
+       │   AND ST_DWithin(location, target, radius_m)   ← метры, geography
        │   AND rooms = target_rooms
        │   AND area_total BETWEEN ...
        │ → применяет IQR-фильтр по asking_price_per_sqm
-       │ → вычисляет similarity_score
+       │ → вычисляет similarity_score, rank, weight
+       │ → фиксирует snapshot-значения comparable
        ▼
-┌────────────────────┐        ┌───────────────────────────┐
-│ search_requests    │───────▶│  valuation_results        │
-│ (адрес, комнаты,  │        │  (weighted_asking_price,  │
-│  площадь, этаж)   │        │   p25/p75, confidence,    │
-└────────────────────┘        │   comparables_count)      │
-                              └───────────────┬───────────┘
+┌────────────────────┐        ┌──────────────────────────────────┐
+│ search_requests    │───────▶│  valuation_results               │
+│ (адрес, комнаты,  │        │  (algorithm_version,             │
+│  площадь, этаж)   │        │   parameters JSONB,              │
+└────────────────────┘        │   weighted_asking_price,         │
+                              │   p25/p75, confidence,           │
+                              │   comparables_count)             │
+                              └───────────────┬──────────────────┘
                                               │
                                               ▼
-                              ┌───────────────────────────┐
-                              │ valuation_comparables     │
-                              │ (listing_id,              │
-                              │  similarity_score,        │
-                              │  distance_m)              │
-                              └───────────────────────────┘
+                              ┌──────────────────────────────────┐
+                              │ valuation_comparables            │
+                              │ (listing_id FK,                  │
+                              │  rank, weight,                   │
+                              │  similarity_score, distance_m,   │
+                              │  asking_price_snapshot,          │
+                              │  asking_price_per_sqm_snapshot,  │
+                              │  area_total_snapshot,            │
+                              │  rooms_snapshot, floor_snapshot, │
+                              │  building_type_snapshot,         │
+                              │  source_id_snapshot)             │
+                              └──────────────────────────────────┘
 ```
 
 ### Lineage и auditability
@@ -546,8 +606,9 @@ erDiagram
 | Listing origin | `listings.source_id + external_id` идентифицирует источник |
 | Price changes | `listing_price_history` хранит полную историю |
 | Deduplication | `duplicate_of_id` указывает на оригинал; оба объявления сохранены |
-| Valuation snapshot | `valuation_comparables` фиксирует список объявлений на момент оценки; `listing_id` позволяет проследить состояние объявления |
-| Source diversity | `source_count` вычисляется на лету: `COUNT(DISTINCT l.source_id) FROM valuation_comparables vc JOIN listings l ON l.id = vc.listing_id WHERE vc.valuation_result_id = ?` |
+| Valuation snapshot | `valuation_comparables` фиксирует snapshot-значения всех ключевых полей comparable на момент оценки; расчёт воспроизводим независимо от последующих изменений в `listings`/`properties`/`buildings` |
+| Algorithm traceability | `valuation_results.algorithm_version` + `parameters` позволяют установить, какой версией алгоритма и с какими параметрами получен каждый результат |
+| Source diversity | `source_count` вычисляется на лету: `COUNT(DISTINCT vc.source_id_snapshot) FROM valuation_comparables vc WHERE vc.valuation_result_id = ?` |
 
 ---
 
@@ -557,16 +618,96 @@ erDiagram
 |---|----------|----------|----------------------|
 | 1 | **Дубликаты** | Одно объявление может появиться в нескольких источниках или повторно в том же источнике с другим `external_id` | `UNIQUE(source_id, external_id)` предотвращает дубли внутри источника; межисточниковые дубли обрабатывает Deduplication Engine через `duplicate_of_id` |
 | 2 | **Изменчивость цены** | Цена объявления может измениться между циклами обновления | `listing_price_history` фиксирует каждое изменение; `asking_price` в `listings` — всегда актуальная цена |
-| 3 | **Адресная нормализация** | «ул. Ленина, 5» и «Ленина ул., д.5» — один адрес; `buildings` может содержать дубли | Геокодирование по координатам + proximity dedup зданий; поле `address_normalized` для текстового сравнения |
+| 3 | **Адресная нормализация** | «ул. Ленина, 5» и «Ленина ул., д.5» — один адрес; `buildings` может содержать дубли | Геокодирование по координатам + proximity dedup зданий; поле `address_normalized` для текстового сравнения. Подробнее — раздел 13. |
 | 4 | **Nullable geo** | Геокодирование может не дать результата; объявление без координат не участвует в spatial-запросах | Сохранять как NULL; исключить из ComparableEngine без ошибки; мониторить долю null |
-| 5 | **Точность денег** | `asking_price / area_total` (kopecks / м²) даёт целочисленное деление с потерей | Вычислять `asking_price_per_sqm` на уровне приложения с округлением; хранить как BIGINT |
-| 6 | **Временна́я согласованность** | Оценка использует текущие данные; прошлые оценки не воспроизводимы если объявления изменились | `valuation_comparables` фиксирует `listing_id` на момент оценки, но не значения полей listing; snapshot объявлений не хранится |
-| 7 | **Воспроизводимость comparable** | При повторном запросе той же оценки результат может отличаться | Принять как допустимое свойство системы; при необходимости — хранить snapshot в JSONB в `valuation_results` |
+| 5 | **Точность денег** | `asking_price / area_total` (kopecks / м²) даёт целочисленное деление с потерей | Вычислять `asking_price_per_sqm` на уровне приложения с округлением ROUND_HALF_UP; хранить как BIGINT |
+| 6 | **Временна́я согласованность** | Оценка использует текущие данные; прошлые оценки должны быть воспроизводимы | Snapshot-поля в `valuation_comparables` фиксируют значения на момент оценки; `algorithm_version` + `parameters` в `valuation_results` фиксируют логику. Расчёт воспроизводим полностью. |
+| 7 | **Воспроизводимость comparable** | При повторном запросе той же оценки набор аналогов может отличаться (новые объявления, изменение статусов) | Конкретный набор comparable и их snapshot-значения зафиксированы в `valuation_comparables`; повторный расчёт по тем же данным даёт тот же результат |
 | 8 | **Выбросы** | После IQR-фильтра может остаться < 5 объявлений; `confidence_score` должен это отражать | Пропустить IQR если < 5 после фильтрации; `confidence_score` коррелирует с `comparables_count` |
 | 9 | **Provider identifiers** | `external_id` уникален только внутри `source_id`; смена источника сбрасывает историю | UNIQUE по `(source_id, external_id)`; межисточниковое связывание — через Dedup Engine |
-| 10 | **Raw payload retention** | `raw_listings.raw_data` (JSONB) может занимать значительное место | Определить TTL/retention policy; после нормализации `raw_data` может быть обнулён или архивирован |
+| 10 | **Raw payload retention** | `raw_listings.raw_data` (JSONB) может занимать значительное место | Определить TTL/retention policy; после нормализации `raw_data` может быть обнулён или архивирован. Подробнее — раздел 14. |
 | 11 | **Privacy / licensing** | `raw_data` может содержать персональные данные (ФИО продавца, телефон) | Не хранить PII в `raw_data` или применять маскировку при нормализации; уточнить лицензию источника |
-| 12 | **Производительность** | Spatial + многоколоночные фильтры на больших наборах данных | GIST на `location`, partial index на `duplicate_of_id IS NULL`, составной индекс по `(rooms, area_total)`; мониторить EXPLAIN ANALYZE |
+| 12 | **Производительность** | Spatial + многоколоночные фильтры на больших наборах данных | Partial GiST на `listings.location`, composite index по `(rooms, area_total)`, GiST на `buildings.location`; мониторить EXPLAIN ANALYZE |
+
+---
+
+## 13. Building and Property identity strategy
+
+> Раздел фиксирует **принятые проектные решения** об идентичности зданий и квартир. Реализация matching-логики относится к Task #4 (Normalizer) и не является частью схемы Task #3.
+
+### Проблема идентичности
+
+Один и тот же физический объект — дом или квартира — может поступать из нескольких источников с разными представлениями адреса, разными координатами и разными наборами атрибутов. Схема должна поддерживать сопоставление без навязывания жёстких constraints, которые Normalizer не сможет обеспечить на практике.
+
+### Canonical address и его роль
+
+**`buildings.address_normalized`** — первичный текстовый ключ идентичности здания:
+
+- Формируется Normalizer из `address_raw` через геокодирование (Nominatim / Yandex Geocoder).
+- Содержит приведённую к стандартному виду строку: город, улица, номер дома без вариаций орфографии и сокращений.
+- Используется как первичный текстовый критерий поиска существующего здания при нормализации нового объявления.
+- Не может служить единственным ключом: один адрес может относиться к разным зданиям в разных городах, и две нормализации одного адреса могут дать незначительно отличающиеся строки.
+
+### Координаты geography(Point, 4326) как вторичный критерий
+
+**`buildings.location`** — второй критерий идентичности, используемый совместно с `address_normalized`:
+
+- При нормализации: если `address_normalized` совпал и расстояние `ST_Distance(existing.location, incoming.location) < 50` метров — это то же здание.
+- Proximity threshold 50 м допускает погрешность геокодирования при совпадении адреса.
+- Если `address_normalized` совпал, но расстояние > 50 м — возможны однофамильцы (улицы с одинаковыми названиями в разных районах) или ошибка геокодирования; создаётся новая строка `buildings`.
+
+### Правила нормализации адреса
+
+- Нормализованный адрес приводится к нижнему регистру, убираются знаки препинания, разворачиваются сокращения (`ул.` → `улица`, `д.` → `дом` и т.п.).
+- Порядок компонентов: `{город}, {улица} {номер}` — фиксированный, не зависит от порядка в источнике.
+- Нормализация выполняется один раз в Normalizer и сохраняется как есть; повторная нормализация не изменяет уже сохранённые строки.
+
+### Ограничения UNIQUE constraint для buildings
+
+Строгий `UNIQUE(address_normalized, city)` **не применяется** по следующим причинам:
+
+- Незначительные отличия нормализации между запусками (обновление геокодера, изменение правил) могут создать дубли, нарушив UNIQUE.
+- Одновременная вставка из нескольких Celery workers может привести к race condition, где оба worker не найдут здание и попытаются создать его — UNIQUE даст ошибку у одного.
+- Схема поддерживает будущую логику слияния зданий без разрушения FK.
+
+**Принятый подход:** Normalizer реализует `SELECT → INSERT` с advisory lock или upsert-стратегией; схема не навязывает UNIQUE, но поле `address_normalized` индексируется.
+
+### Property matching внутри Building
+
+Квартира (property) идентифицируется внутри здания по комбинации `(building_id, floor, rooms, area_total)`:
+
+- Normalizer перед вставкой ищет совпадение: `building_id = ? AND floor = ? AND rooms = ? AND |area_total - incoming| < 1.0`.
+- Допуск 1 м² по площади компенсирует разночтения источников (35.0 vs 35.4 м²).
+- Если совпадение найдено — новое объявление привязывается к существующей `property`; новая `property` не создаётся.
+- Если нет — создаётся новая `property`. Физически это может быть та же квартира с другим планом или ошибкой в данных источника.
+
+**Ограничения:** строгий `UNIQUE(building_id, floor, rooms, area_total)` не применяется по тем же причинам, что и для buildings — допуск по площади несовместим с UNIQUE constraint.
+
+### Что остаётся для Normalizer (Task #4)
+
+Схема предоставляет поля и структуру. Следующие решения реализуются в Normalizer:
+
+- Алгоритм поиска существующего `buildings` (advisory lock, upsert, retry).
+- Алгоритм поиска существующей `properties` (SELECT с допуском по `area_total`).
+- Стратегия при конфликте (race condition, несколько worker).
+- Обработка случая, когда геокодирование вернуло NULL — нельзя применить proximity dedup.
+
+---
+
+## 14. Deferred improvements
+
+> Решения, **сознательно отложенные** до появления доказательной необходимости. Возврат к каждому пункту обусловлен конкретным trigger-событием.
+
+| Улучшение | Trigger для возврата |
+|-----------|---------------------|
+| **Table partitioning** — `raw_listings` по `collected_at`, `listing_price_history` по `recorded_at`, `valuation_results` по `computed_at` | Деградация query performance или объём таблицы > 5M строк; решение после `EXPLAIN ANALYZE` на реальных данных |
+| **Materialized view для ComparableEngine** — денормализация `rooms`, `area_total`, `floor`, `building_type` из `properties`/`buildings` в одну плоскую таблицу | Измеримое замедление JOIN при профилировании; не применять без данных profiling |
+| **Полная история статусов listings** — отдельная таблица `listing_status_history` вместо одного `removed_at` | Появление бизнес-требования к аудиту промежуточных переходов (напр., `removed → active → sold`) |
+| **Raw JSONB retention / TTL** — обнуление или архивирование `raw_listings.raw_data` после нормализации | До перехода в production; определяется объёмом хранилища и требованиями к повторной нормализации |
+| **Weight breakdown и exclusion reasons в comparables** — отдельные поля для каждой компоненты веса (geographic_weight, area_weight и т.д.) и причины IQR-исключения | Запрос на объяснимость алгоритма оценки от пользователей или внутренней команды; для MVP достаточно `weight` итоговый и `parameters` в `valuation_results` |
+| **Duplicate chain safeguards** — constraint, запрещающий `duplicate_of_id` указывать на строку с ненулевым `duplicate_of_id` | Обнаружение цепочек дублей (A → B → C) в данных; реализуется CHECK или триггером |
+| **Search request deduplication** — повторный запрос по тому же адресу и параметрам возвращает существующий `search_request` | Измеримое дублирование запросов; решается на уровне API или background task, не схемы |
+| **Дополнительные performance optimizations** — covering indexes, partial indexes по `status = 'active'` отдельно, bloom filters | После нагрузочного тестирования с реальным распределением данных |
 
 ---
 
@@ -574,22 +715,24 @@ erDiagram
 
 > **Decision Checklist** — каждый пункт должен быть явно согласован перед Task #3. Молчаливая фиксация недопустима.
 
-| # | Вопрос | Варианты | Рекомендация / Комментарий |
-|---|--------|----------|---------------------------|
-| 1 | **UUID vs BIGINT SERIAL** для PK | `gen_random_uuid()` (UUID v4) / `BIGINT GENERATED ALWAYS AS IDENTITY` | UUID: глобальная уникальность, сложнее pagination. BIGINT: компактнее, быстрее JOIN. Для MVP с одним инстансом оба приемлемы. |
-| 2 | **`geometry` vs `geography`** (PostGIS) | `geometry(Point, 4326)` / `geography(Point, 4326)` | `geometry`: быстрее, требует `ST_DWithin` с метрами через `ST_Distance_Sphere`. `geography`: встроенные метры, медленнее. Для радиуса < 50 км разница пренебрежима; рекомендуется `geometry` с явным SRID 4326. |
-| 3 | **Каноническая идентичность объявления** | `(source_id, external_id)` / hash(url) / content hash | UNIQUE по `(source_id, external_id)` — наиболее надёжный; URL-дубли ловит Dedup Engine. |
-| 4 | **Представление истории цен** | Отдельная таблица `listing_price_history` / JSONB-массив в `listings` / append-only версии строк | Отдельная таблица — наиболее нормализованный вариант; JSONB проще но нет индексирования. |
-| 5 | **Адресная модель** | Плоские поля `city, street, house_number` / единое поле `address_normalized` / вложенный JSONB | Плоские поля + `address_normalized` — баланс нормализации и читаемости. |
-| 6 | **Enum vs CHECK constraints vs lookup table** | PostgreSQL ENUM / VARCHAR + CHECK / отдельная таблица | ENUM: жёстко, требует миграции для нового значения. CHECK: гибко. Lookup table: максимум гибкости. Рекомендуется: VARCHAR + CHECK для MVP, переход на ENUM позже. |
-| 7 | **Raw payload JSONB retention** | Хранить вечно / обнулять после нормализации / TTL по `collected_at` | Определить явно: объём `raw_data` может расти неограниченно. |
-| 8 | **Snapshot immutability valuation_comparables** | Только `listing_id` (ссылка на живые данные) / JSONB-snapshot значений listing на момент оценки | `listing_id` достаточно для MVP; snapshot нужен только если требуется точное воспроизведение. |
-| 9 | **Политика удаления** | Никогда не удалять (soft delete через `status`) / физическое удаление с архивом / TTL | Для `listings` — никогда не удалять (зафиксировано). Для `raw_listings`, `search_requests`, `valuation_results` — определить TTL. |
-| 10 | **Timestamps и timezone** | `TIMESTAMPTZ` везде (UTC) / `TIMESTAMP` + explicit conversion | Только `TIMESTAMPTZ`. Celery timezone = `Europe/Moscow` (в `celery_app.py`), но хранение в UTC. |
-| 11 | **Валюта и единицы площади** | Только RUB (kopecks) / мульти-валюта / только м² / мульти-юниты | MVP: только RUB в kopecks, только м². Явно задокументировать в комментарии к каждому денежному и площадному полю. |
-| 12 | **Naming conventions** | `snake_case` таблицы (plural / singular) / quoted identifiers | `snake_case`, множественное число (соответствует текущему дизайну), без quoted identifiers. |
-| 13 | **`asking_price_per_sqm` — вычислять или хранить** | Вычислять на лету / хранить как денормализованный BIGINT | Хранить (денормализация): ComparableEngine и IQR-фильтр обращаются к нему постоянно; вычисление каждый раз дорого. |
-| 14 | **Владелец расширения PostGIS** | Пользователь `app` (ограниченные права) / postgres superuser при инициализации контейнера | `postgis/postgis:16-3.4` устанавливает расширения автоматически при старте. Для `CREATE EXTENSION` в миграции может потребоваться superuser или выполнение до миграции. |
+| # | Вопрос | Варианты | Статус / Решение |
+|---|--------|----------|-----------------|
+| 1 | **UUID vs BIGINT SERIAL** для PK | `gen_random_uuid()` (UUID v4) / `BIGINT GENERATED ALWAYS AS IDENTITY` | ⬜ Открыт. UUID: глобальная уникальность, сложнее pagination. BIGINT: компактнее, быстрее JOIN. Для MVP с одним инстансом оба приемлемы. |
+| 2 | **`geography` vs `geometry`** (PostGIS) | `geography(Point, 4326)` / `geometry(Point, 4326)` | ✅ **Решено: `geography(Point, 4326)`.** `ST_DWithin` и `ST_Distance` работают в метрах нативно; исключает класс ошибок с radius в градусах. GiST-индексы поддерживаются. |
+| 3 | **Каноническая идентичность объявления** | `(source_id, external_id)` / hash(url) / content hash | ⬜ Открыт. UNIQUE по `(source_id, external_id)` — наиболее надёжный; URL-дубли ловит Dedup Engine. |
+| 4 | **Представление истории цен** | Отдельная таблица `listing_price_history` / JSONB-массив в `listings` / append-only версии строк | ⬜ Открыт. Отдельная таблица — наиболее нормализованный вариант; JSONB проще но нет индексирования. |
+| 5 | **Адресная модель** | Плоские поля `city, street, house_number` / единое поле `address_normalized` / вложенный JSONB | ⬜ Открыт. Плоские поля + `address_normalized` — баланс нормализации и читаемости. |
+| 6 | **Enum vs CHECK constraints vs lookup table** | PostgreSQL ENUM / VARCHAR + CHECK / отдельная таблица | ⬜ Открыт. ENUM: жёстко, требует миграции для нового значения. CHECK: гибко. Рекомендуется: VARCHAR + CHECK для MVP. |
+| 7 | **Raw payload JSONB retention** | Хранить вечно / обнулять после нормализации / TTL по `collected_at` | ⬜ Открыт. Определить явно перед production. Отложено — раздел 14. |
+| 8 | **Immutable comparable snapshot** | Только `listing_id` (ссылка на живые данные) / snapshot-поля значений comparable на момент оценки | ✅ **Решено: snapshot-поля обязательны.** В `valuation_comparables` добавлены `asking_price_snapshot`, `asking_price_per_sqm_snapshot`, `area_total_snapshot`, `rooms_snapshot`, `floor_snapshot`, `building_type_snapshot`, `source_id_snapshot`, `rank`, `weight`. Расчёт воспроизводим независимо от изменений `listings`. |
+| 9 | **Политика удаления** | Никогда не удалять (soft delete через `status`) / физическое удаление с архивом / TTL | ⬜ Частично решён. Для `listings` — никогда не удалять (зафиксировано). Для `raw_listings`, `search_requests`, `valuation_results` — определить TTL. |
+| 10 | **Timestamps и timezone** | `TIMESTAMPTZ` везде (UTC) / `TIMESTAMP` + explicit conversion | ✅ **Зафиксировано:** только `TIMESTAMPTZ`. Celery timezone = `Europe/Moscow` (в `celery_app.py`), хранение в UTC. |
+| 11 | **Валюта и единицы площади** | Только RUB (kopecks) / мульти-валюта / только м² / мульти-юниты | ✅ **Зафиксировано:** только RUB в kopecks, только м². |
+| 12 | **Naming conventions** | `snake_case` таблицы (plural / singular) / quoted identifiers | ✅ **Зафиксировано:** `snake_case`, множественное число, без quoted identifiers. |
+| 13 | **`asking_price_per_sqm` — вычислять или хранить** | Вычислять на лету / хранить как денормализованный BIGINT | ✅ **Зафиксировано:** хранить. ComparableEngine и IQR-фильтр обращаются к нему постоянно; вычисление каждый раз дорого. Округление: ROUND_HALF_UP. |
+| 14 | **Владелец расширения PostGIS** | Пользователь `app` (ограниченные права) / postgres superuser при инициализации контейнера | ⬜ Открыт. `postgis/postgis:16-3.4` устанавливает расширения автоматически при старте. Для `CREATE EXTENSION` в миграции может потребоваться superuser или выполнение до миграции. |
+| 15 | **Algorithm version и parameters в valuation_results** | Не хранить / хранить `algorithm_version` + `parameters JSONB` | ✅ **Решено: обязательны.** Поля `algorithm_version VARCHAR(50) NOT NULL` и `parameters JSONB NOT NULL DEFAULT '{}'` добавлены в `valuation_results`. Обеспечивают аудит и воспроизводимость независимо от текущих env-переменных. |
+| 16 | **Building и Property identity strategy** | Строгий UNIQUE / proximity dedup / только текстовый matching | ✅ **Решено на уровне дизайна.** Принята стратегия: `address_normalized` + proximity 50 м для buildings; допуск 1 м² по `area_total` для properties. Строгий UNIQUE не применяется. Реализация matching-логики — Task #4 (Normalizer). Подробнее — раздел 13. |
 
 ---
 
@@ -597,9 +740,12 @@ erDiagram
 
 Дизайн готов к переходу в Task #3, когда все пункты отмечены:
 
-- [ ] Все 14 пунктов Decision Checklist (раздел 10) согласованы и зафиксированы
+- [ ] Все открытые пункты Decision Checklist (раздел 10, пункты 1, 3, 4, 5, 6, 7, 9, 14) согласованы и зафиксированы
 - [ ] Выбрана стратегия запуска `alembic upgrade head` в Replit (entrypoint vs `docker run --rm`) — см. `docs/architecture-map.md`, раздел «Открытые вопросы»
-- [ ] Определена retention policy для `raw_listings` и `valuation_results`
-- [ ] Подтверждена схема именования (plural snake_case без quoted identifiers)
+- [ ] Определена retention policy для `raw_listings` и `valuation_results` (раздел 14)
+- [ ] Подтверждена схема именования (plural snake_case без quoted identifiers) ✅
 - [ ] Подтверждён пользователь БД и его права для `CREATE EXTENSION postgis`
+- [ ] Задокументирован допустимый диапазон значений `algorithm_version` (формат строки, versioning scheme)
+- [ ] Зафиксирован формат JSONB `parameters` для v1.0 алгоритма (обязательные ключи: `radius_m`, `iqr_multiplier`, `max_comparables`)
+- [ ] Раздел 13 (Building and Property identity strategy) принят как проектное решение, достаточное для Task #3; реализация matching отложена до Task #4
 - [ ] Документ просмотрен и принят как техническое задание для Task #3
