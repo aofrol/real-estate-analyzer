@@ -1,1 +1,1 @@
-- [Docker healthchecks in Replit](docker-healthchecks.md) — CMD/CMD-SHELL healthchecks fail via setns; omit them and use service_started + restart: unless-stopped instead.
+- [Docker + Replit compatibility](docker-healthchecks.md) — healthchecks fail (setns blocked), Docker NAT invisible to port watcher, root-owned volume files, package firewall, workflow outputType rules.

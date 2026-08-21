@@ -76,15 +76,18 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     volumes:
       - ./frontend:/app
-      # Anonymous volume prevents host node_modules from overriding container's
       - /app/node_modules
       - /app/.next
     ports:
-      # Map container 3000 → host 5000 (Replit webview port)
-      - "5000:3000"
+      # On a production VPS, docker compose up starts all services including
+      # this container. Container runs on 5000, maps to host 5000.
+      - "5000:5000"
     depends_on:
       - backend
     restart: unless-stopped
+    # NOTE for Replit: The Replit workflow does NOT start this container.
+    # Instead it runs Next.js natively (see replit.md). This entry is kept
+    # for production VPS deployment where docker compose up starts everything.
 
 volumes:
   postgres_data:

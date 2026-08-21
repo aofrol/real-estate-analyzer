@@ -10,5 +10,5 @@ RUN npm install
 COPY . .
 
 # Next.js dev server on port 3000 (docker-compose maps to host :5000)
-EXPOSE 3000
+EXPOSE 5000
 CMD ["npm", "run", "dev"]

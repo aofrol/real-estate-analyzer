@@ -1,4 +1,4 @@
-modules = ["python-base-3.13"]
+modules = ["python-base-3.13", "nodejs-24"]
 [nix]
 channel = "stable-25_05"
 
@@ -22,8 +22,13 @@ name = "Start application"
 author = "agent"
 
 [workflows.workflow.metadata]
-outputType = "console"
+outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "docker compose up --build"
+args = "docker compose up -d db redis backend worker --build && cd frontend && ([ -d node_modules ] || npm install) && npm run dev"
+waitForPort = 5000
+
+[[ports]]
+localPort = 5000
+externalPort = 80

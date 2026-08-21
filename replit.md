@@ -14,23 +14,26 @@ MVP сервис автоматизированной оценки рыночн�
 
 ## How to Run
 
+### On Replit (development)
+Use the **"Start application"** workflow (one click). It runs:
 ```bash
-# 1. Copy environment file
-cp .env.example .env
-
-# 2. Start all services (first run builds images — takes ~2–3 min)
-docker compose up --build
-
-# Or use the Replit "Start application" workflow
+docker compose up -d db redis backend worker --build
+cd frontend && ([ -d node_modules ] || npm install) && npm run dev
 ```
+Backend services (db, redis, api, worker) run in Docker. Next.js runs natively so Replit Preview can detect port 5000 directly.
 
-**Service URLs (after startup):**
+**Service URLs:**
 | Service | URL |
 |---------|-----|
-| Frontend (Next.js) | http://localhost:5000 |
+| Frontend (Next.js) | http://localhost:5000 (Replit Preview) |
 | Backend API (FastAPI) | http://localhost:8000 |
 | API docs (Swagger) | http://localhost:8000/docs |
-| Celery Flower (optional) | http://localhost:5555 |
+
+### On a production Linux VPS
+```bash
+cp .env.example .env   # fill in real values
+docker compose up --build -d   # starts ALL services including frontend container
+```
 
 ## Architecture
 
