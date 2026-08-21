@@ -1,0 +1,1 @@
+- [Docker healthchecks in Replit](docker-healthchecks.md) — CMD/CMD-SHELL healthchecks fail via setns; omit them and use service_started + restart: unless-stopped instead.

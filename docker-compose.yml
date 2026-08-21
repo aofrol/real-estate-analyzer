@@ -9,11 +9,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-realestate}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+    # Note: Docker healthchecks (CMD/CMD-SHELL) rely on `docker exec` / setns,
+    # which is not permitted in Replit's container environment.
+    # Healthchecks are intentionally omitted; dependent services use
+    # restart: unless-stopped to handle any startup-ordering races.
 
   redis:
     image: redis:7-alpine
@@ -21,11 +20,7 @@ services:
       - redis_data:/data
     ports:
       - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    # See note on db service — healthchecks omitted for the same reason.
 
   backend:
     build:
@@ -47,9 +42,9 @@ services:
       - "8000:8000"
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_started
       redis:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
   worker:
@@ -68,9 +63,9 @@ services:
       - ./backend:/app
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_started
       redis:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
   frontend:

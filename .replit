@@ -1,3 +1,4 @@
+modules = ["python-base-3.13"]
 [nix]
 channel = "stable-25_05"
 
@@ -20,10 +21,9 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "docker compose up --build"
-waitForPort = 5000
-
-[workflows.workflow.metadata]
-outputType = "webview"
