@@ -17,6 +17,9 @@ External Source
 Source Adapter
         |
         ↓
+Collector
+        |
+        ↓
 Raw Listing Storage
         |
         ↓
@@ -80,7 +83,9 @@ Source Adapter скрывает различия между источникам
 
 - `collect()`;
 - `parse()`;
-- `normalize()`.
+
+Adapter отвечает за получение и первичный разбор данных.
+Normalizer отвечает за приведение к доменной модели.
 
 Примеры реализаций:
 
@@ -107,10 +112,23 @@ Listing
 
 Правила:
 
+**RawListing:**
+
+- хранит оригинальный payload;
+- является источником истины;
+- не изменяется после создания.
+
 **Building:**
 
 - идентификация по адресу и координатам;
 - дубликаты не создаются при повторной загрузке.
+
+MVP identity matching основан на:
+
+- normalized address;
+- географической близости координат.
+
+Полная стратегия дедупликации развивается отдельно.
 
 **Property:**
 
@@ -141,7 +159,9 @@ Listing
 
 - PostgreSQL/PostGIS database;
 - SQLAlchemy models;
-- Alembic migrations.
+- Alembic migrations;
+- Initial database schema migration applied;
+- 9 core domain tables created.
 
 ### Planned
 
