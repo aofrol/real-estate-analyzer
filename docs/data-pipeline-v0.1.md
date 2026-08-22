@@ -14,13 +14,19 @@ Data Ingestion Pipeline отвечает за получение данных о
 External Source
         |
         ↓
-Source Adapter
+SourceAdapter
         |
         ↓
 Collector
         |
         ↓
-Raw Listing Storage
+IngestionService
+        |
+        ↓
+RawListingRepository
+        |
+        ↓
+`raw_listings` table
         |
         ↓
 Normalizer
@@ -96,7 +102,77 @@ Normalizer отвечает за приведение к доменной мод
 
 ---
 
-## 5. Normalization Strategy
+## 5. Collector Layer
+
+Collector отвечает за оркестрацию получения сырых объявлений через
+`SourceAdapter`.
+
+Collector:
+
+- принимает `SourceAdapter` как dependency;
+- вызывает `SourceAdapter.collect()`;
+- передаёт raw listing payloads дальше без изменения.
+
+Collector не отвечает за:
+
+- доступ к базе данных;
+- создание ORM-объектов;
+- нормализацию;
+- дедупликацию.
+
+Текущая реализация:
+
+- `Collector`;
+- `MockCollector`.
+
+---
+
+## 6. Repository Layer
+
+Repository Layer определяет persistence contract для сырых объявлений.
+
+`RawListingRepository` отвечает только за сохранение raw listing payload.
+`SQLAlchemyRawListingRepository` реализует этот контракт через SQLAlchemy:
+
+- создаёт `RawListing`;
+- добавляет объект в переданную session;
+- выполняет `flush()`.
+
+Repository Layer не отвечает за:
+
+- создание `Source`;
+- нормализацию;
+- дедупликацию;
+- orchestration сбора данных.
+
+---
+
+## 7. Ingestion Service
+
+`IngestionService` связывает Collector и RawListingRepository.
+
+Service:
+
+- вызывает `collector.collect()`;
+- обрабатывает каждый raw listing dictionary;
+- формирует persistence payload:
+
+```python
+{
+    "source_id": UUID,
+    "external_id": str,
+    "raw_data": dict,
+}
+```
+
+- передаёт payload в `repository.save()`.
+
+Service не создаёт ORM-объекты, не работает с SQLAlchemy session,
+не нормализует и не дедуплицирует объявления.
+
+---
+
+## 8. Normalization Strategy
 
 ```text
 RawListing
@@ -142,7 +218,7 @@ MVP identity matching основан на:
 
 ---
 
-## 6. Data Ownership
+## 9. Data Ownership
 
 | Layer | Owner | Storage |
 |------|------|---------|
@@ -153,7 +229,7 @@ MVP identity matching основан на:
 
 ---
 
-## 7. Current Implementation Status
+## 10. Current Implementation Status
 
 ### Completed
 
@@ -162,18 +238,24 @@ MVP identity matching основан на:
 - Alembic migrations;
 - Initial database schema migration applied;
 - 9 core domain tables created.
+- Task #4 completed — ingestion pipeline foundation implemented;
+- `SourceAdapter`;
+- `MockAdapter`;
+- `Collector`;
+- `MockCollector`;
+- `RawListingRepository`;
+- `SQLAlchemyRawListingRepository`;
+- `IngestionService`;
+- ingestion pipeline tests.
 
 ### Planned
 
-- Source Adapter Interface;
-- `MockAdapter`;
-- Collector;
 - Normalizer;
-- External sources integration.
+- Real source integrations.
 
 ---
 
-## 8. Out of Scope
+## 11. Out of Scope
 
 Task #4 не включает:
 
