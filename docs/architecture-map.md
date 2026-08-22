@@ -3,11 +3,10 @@
 | Параметр | Значение |
 |----------|---------|
 | **Версия проекта** | v0.1 |
-| **Статус** | Foundation (Task #2 завершён) |
-| **Отражает** | Текущее состояние проекта: инфраструктурный каркас без прикладной логики |
 | **Дата** | 2026-08-21 |
-| **Следующий шаг** | Task #3 — Database Schema & Migrations |
-
+| **Статус** | Foundation + Database Layer completed |
+| **Отражает** | Текущее состояние проекта: инфраструктура + схема данных + миграции |
+| **Следующий шаг** | Task #4 — Data Ingestion & Normalization |
 ---
 
 ## 1. Текущая инфраструктура
@@ -37,6 +36,31 @@ cd frontend && ([ -d node_modules ] || npm install) && npm run dev
 
 **Production hardening — технический долг.**
 Текущий compose-файл оптимизирован для dev/Replit. Для production необходимо: добавить healthchecks, убрать `--reload` из uvicorn, заменить bind mounts на запечённый в образ код, убрать небезопасные defaults, настроить публичный `NEXT_PUBLIC_API_URL`, выровнять `GEOCODING_PROVIDER` между сервисами, добавить сетевую изоляцию, закрыть порты DB/Redis от хоста. Полный список — [`docs/technical-debt.md`](technical-debt.md).
+
+## Development vs Production Environment Strategy
+
+### Текущая среда разработки
+
+- Replit;
+- Replit Managed PostgreSQL;
+- совместимость с PostgreSQL 16;
+- PostGIS;
+- pgcrypto;
+- SQLAlchemy;
+- Alembic.
+
+### Production стратегия
+
+- PostgreSQL версии 16 или выше;
+- PostGIS версии 3.x или выше;
+- применение и версионирование схемы только через Alembic;
+- перенос данных через `pg_dump`/`pg_restore` либо эквивалентный совместимый механизм.
+
+### Архитектурные принципы
+
+- приложение зависит от базы данных только через `DATABASE_URL`;
+- продукт не зависит от Replit-specific API;
+- Replit является dev-средой и инструментом разработки, а не runtime-компонентом продукта.
 
 ---
 
@@ -294,3 +318,58 @@ graph TB
 - Оригинальное ТЗ → `attached_assets/Pasted--MVP-v1-0--1786819713082_1786819713083.txt`
 - Task-спецификации → `.local/tasks/01-project-foundation.md` … `07-frontend.md`
 - Replit-ограничения (healthchecks, ports, volumes) → `.agents/memory/docker-healthchecks.md`
+
+## Development vs Production Environment Strategy
+
+### Current Development Environment
+
+The MVP is currently developed in Replit environment.
+
+Infrastructure:
+
+- Runtime: Replit
+- Database: Replit Managed PostgreSQL
+- Database engine: PostgreSQL 16 compatible
+- Extensions:
+  - PostGIS
+  - pgcrypto
+- ORM: SQLAlchemy
+- Migration tool: Alembic
+
+The application connects to the database only through DATABASE_URL.
+
+No business logic depends on Replit-specific database features.
+
+---
+
+## Production Migration Strategy
+
+Production environment should support:
+
+- PostgreSQL >= 16
+- PostGIS >= 3.x
+- pgcrypto extension
+- Alembic migrations
+- SQLAlchemy compatibility
+
+Migration process:
+
+1. Provision production PostgreSQL cluster.
+2. Enable required extensions.
+3. Execute:
+   ```bash
+   alembic upgrade head
+   ```
+4. Transfer data using PostgreSQL native tools.
+5. Update DATABASE_URL.
+
+---
+
+The application must not depend on:
+
+- Replit-specific database APIs;
+- Replit-only storage mechanisms;
+- Replit-only execution workflows;
+- environment-specific networking assumptions.
+
+Replit is considered a development platform, not an application dependency.

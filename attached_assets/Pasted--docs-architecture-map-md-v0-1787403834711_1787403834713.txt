@@ -1,0 +1,217 @@
+Задача: обновить файл docs/architecture-map.md до финального состояния архитектурной документации v0.1.
+
+ВАЖНО:
+- Работай только с файлом docs/architecture-map.md.
+- Не изменяй код, миграции, модели, docker-compose, README и другие файлы.
+- Не создавай новые файлы.
+- Сохрани текущую структуру документа, форматирование Markdown, таблицы и Mermaid-диаграммы.
+- Вноси только необходимые правки для актуализации документа после завершения Task #3 Database Schema & Migrations.
+
+Цель:
+Привести architecture-map.md к состоянию "Architecture Map v0.1 — Database Foundation Completed".
+
+Необходимо выполнить следующие изменения.
+
+---
+
+## 1. Обновить статус проекта в начале документа
+
+Найти блок:
+
+Status:
+Foundation (Task #2 завершён)
+
+Заменить на:
+
+Foundation + Database Layer completed
+
+Обновить следующий шаг:
+
+Было:
+Task #3 — Database Schema & Migrations
+
+Стало:
+
+Task #4 — Data Ingestion & Normalization
+
+Также обновить описание:
+
+Было:
+"Текущее состояние проекта: инфраструктурный каркас без прикладной логики"
+
+Стало:
+
+"Текущее состояние проекта: инфраструктура, ORM-модели, схема базы данных и миграции реализованы; бизнес-логика обработки данных ещё находится в разработке"
+
+---
+
+## 2. Исправить версии инфраструктуры
+
+В разделе текущей инфраструктуры:
+
+Заменить:
+
+PostgreSQL 16.4 + PostGIS 3.4.3
+
+на:
+
+PostgreSQL 16 + PostGIS 3.5.3 (Replit development environment)
+
+Если встречается аналогичная формулировка ниже по документу — привести к тому же значению.
+
+---
+
+## 3. Исправить Development Environment Strategy
+
+В разделе:
+
+## Development vs Production Environment Strategy
+
+В подразделе:
+
+### Current Development Environment
+
+Не писать, что база только Replit Managed PostgreSQL.
+
+Использовать формулировку:
+
+Database:
+
+- Development: PostgreSQL instance provided by Replit environment
+- Local/container mode: PostgreSQL + PostGIS via docker-compose
+
+Смысл:
+
+Приложение использует стандартный PostgreSQL через DATABASE_URL и не зависит от специфичных возможностей Replit.
+
+Оставить без изменений:
+
+- SQLAlchemy
+- Alembic
+- PostGIS
+- pgcrypto
+
+---
+
+## 4. Обновить Task #3 раздел
+
+Текущий раздел:
+
+## 5. Границы Task #3 — Database Schema & Migrations
+
+переписать в формат:
+
+## 5. Task #3 — Database Schema & Migrations
+
+Добавить в начало:
+
+### Completed
+
+Task #3 completed successfully.
+
+Implemented:
+
+- SQLAlchemy ORM models
+- Alembic migration framework
+- Initial database schema migration
+- PostgreSQL/PostGIS extensions
+- Database indexes
+- UUID primary keys
+- Immutable valuation comparable snapshots
+
+Добавить:
+
+Migration:
+
+Revision:
+a153db291edf
+
+Status:
+Applied successfully
+
+Database objects:
+
+- 9 application tables
+- PostGIS extension
+- pgcrypto extension
+- Alembic version tracking
+
+
+После этого оставить существующее описание таблиц.
+
+---
+
+## 5. Исправить PostGIS типы
+
+Во всех местах документа заменить:
+
+geometry(Point, 4326)
+
+на:
+
+geography(Point,4326)
+
+Причина:
+Фактическая реализация использует GeoAlchemy2 Geography для расчётов расстояния в метрах через ST_DWithin/ST_Distance.
+
+---
+
+## 6. Обновить диаграмму компонентов Mermaid
+
+В блоке Planned:
+
+Было:
+
+SCH["📋 DB Schema
+ORM Models
+Migrations
+(Task #3)"]
+
+Заменить:
+
+SCH["📋 DB Schema<br/>ORM Models<br/>Migrations<br/>✅ Completed"]
+
+Также изменить визуальный статус SCH:
+
+Он больше не должен быть Planned.
+
+---
+
+## 7. Исправить открытые вопросы
+
+Удалить вопрос:
+
+"Стратегия запуска alembic upgrade head в Replit (entrypoint vs docker run --rm)"
+
+Он закрыт.
+
+Заменить на:
+
+"Production migration workflow | Before production deployment"
+
+---
+
+## 8. Обновить раздел Production Migration Strategy
+
+Оставить текущую структуру:
+
+Production environment should support:
+
+- PostgreSQL >= 16
+- PostGIS >= 3.x
+- pgcrypto extension
+- Alembic migrations
+- SQLAlchemy compatibility
+
+Оставить Migration process:
+
+1. Provision production PostgreSQL cluster.
+2. Enable required extensions.
+3. Execute:
+```bash
+alembic upgrade head
+Transfer data using PostgreSQL native tools.
+Update DATABASE_URL.
+Проверить корректность Markdown fence:
+открыть и закрыть блок bash тройными обратными кавычками;
+не помещать пункты 4 и 5 внутрь code block.
