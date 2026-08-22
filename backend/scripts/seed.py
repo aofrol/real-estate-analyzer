@@ -192,17 +192,24 @@ def seed() -> None:
         property_record = _get_or_create_property(session, building, created)
         _get_or_create_raw_listing(session, source, created)
         _get_or_create_listing(session, source, property_record, created)
+
         session.commit()
 
+        created_ids = {
+            model_name: [record.id for record in records]
+            for model_name, records in created.items()
+        }
+
     total_created = sum(len(records) for records in created.values())
+
     print(f"Created objects: {total_created}")
     for model_name, records in created.items():
         print(f"  {model_name}: {len(records)}")
 
     print("Created IDs:")
-    for model_name, records in created.items():
-        for record in records:
-            print(f"  {model_name}: {record.id}")
+    for model_name, ids in created_ids.items():
+        for record_id in ids:
+            print(f"  {model_name}: {record_id}")
 
 
 if __name__ == "__main__":
