@@ -51,8 +51,8 @@ LOCATION = WKTElement("POINT(37.6173 55.7558)", srid=4326)
 FLOOR = 5
 ROOMS = 2
 AREA_TOTAL = Decimal("55.5")
-ASKING_PRICE_KOPECKS = 12_500_000
-ASKING_PRICE_PER_SQM_KOPECKS = 225_225
+ASKING_PRICE_KOPECKS = 1_250_000_000
+ASKING_PRICE_PER_SQM_KOPECKS = 22_522_522
 
 
 def _get_or_create_source(session: Any, created: dict[str, list[Any]]) -> Source:
@@ -105,6 +105,7 @@ def _get_or_create_property(
             floor=FLOOR,
             rooms=ROOMS,
             area_total=AREA_TOTAL,
+            is_studio=False,
         )
         session.add(property_record)
         session.flush()
