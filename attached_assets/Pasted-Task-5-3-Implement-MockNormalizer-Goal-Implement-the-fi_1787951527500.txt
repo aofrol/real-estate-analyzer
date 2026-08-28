@@ -1,0 +1,311 @@
+Task #5.3 — Implement MockNormalizer
+
+Goal:
+Implement the first concrete Normalizer for the deterministic Mock source.
+
+This task proves that a source/raw dictionary can be converted into the
+canonical NormalizedListing contract introduced in Task #5.2.
+
+Keep the implementation intentionally small and deterministic.
+
+
+CURRENT PIPELINE
+
+MockAdapter
+    ↓
+MockCollector
+    ↓
+raw dictionary
+    ↓
+MockNormalizer
+    ↓
+NormalizedListing
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/sources/mock.py
+backend/app/normalization/base.py
+backend/app/normalization/types.py
+backend/tests/test_source_adapter.py
+backend/tests/test_normalizer_interface.py
+
+Use the ACTUAL current MockAdapter payload as the source contract.
+
+Do not invent a second Mock source format.
+
+Report briefly which raw keys MockAdapter currently emits before making changes.
+
+
+==================================================
+2. CREATE MOCK NORMALIZER
+==================================================
+
+Create:
+
+backend/app/normalization/mock.py
+
+Implement:
+
+class MockNormalizer(Normalizer)
+
+It must implement:
+
+normalize(raw_listing: dict[str, Any]) -> NormalizedListing
+
+
+Responsibilities:
+
+- read the actual fields emitted by MockAdapter;
+- convert them into the canonical NormalizedListing schema;
+- return a NEW dictionary;
+- never mutate raw_listing.
+
+
+==================================================
+3. CANONICAL OUTPUT
+==================================================
+
+The returned dictionary must contain every NormalizedListing key:
+
+external_id
+address
+city
+area_sqm
+rooms
+is_studio
+floor
+total_floors
+asking_price_kopecks
+asking_price_per_sqm_kopecks
+latitude
+longitude
+source_url
+building_type
+listed_at
+
+
+Use the existing canonical semantics:
+
+- money = integer kopecks;
+- area = square metres;
+- rooms = int | None;
+- studio means:
+    is_studio = True
+    rooms = None;
+- unknown canonical values = None.
+
+IMPORTANT:
+
+Do not put database identifiers into the result.
+
+Forbidden keys include:
+
+source_id
+building_id
+property_id
+listing_id
+duplicate_of_id
+
+
+==================================================
+4. PRICE PER SQM
+==================================================
+
+Use the ACTUAL MockAdapter contract.
+
+If MockAdapter already supplies canonical price-per-sqm data, map it.
+
+If MockAdapter supplies only total asking price and area, calculate:
+
+asking_price_per_sqm_kopecks =
+    round(asking_price_kopecks / area_sqm)
+
+Do not use floating-point RUB for money.
+
+Do not modify MockAdapter merely to make MockNormalizer easier to implement.
+
+If the current MockAdapter data uses another explicit monetary representation,
+convert it carefully into integer kopecks and explain the mapping in the report.
+
+
+==================================================
+5. DATETIME HANDLING
+==================================================
+
+If the raw payload provides listed_at:
+
+- preserve it if it is already datetime;
+- if MockAdapter emits an ISO-8601 string, parse it using Python standard
+  library datetime facilities.
+
+If MockAdapter does not provide listed_at:
+
+listed_at = None
+
+Do not introduce third-party datetime libraries.
+
+
+==================================================
+6. VALIDATION — FAIL FAST
+==================================================
+
+MockNormalizer may perform only minimal validation required to avoid producing
+obviously invalid canonical values.
+
+At minimum:
+
+- external_id must be present and non-empty;
+- address must be present and non-empty;
+- area_sqm must be greater than 0;
+- asking_price_kopecks must be greater than 0.
+
+For invalid input, raise ValueError with a concise message.
+
+Do NOT build a generic validation framework.
+Do NOT introduce custom exception hierarchies.
+Do NOT add Pydantic.
+
+
+==================================================
+7. PUBLIC EXPORT
+==================================================
+
+Update:
+
+backend/app/normalization/__init__.py
+
+Export:
+
+MockNormalizer
+
+alongside:
+
+Normalizer
+NormalizedListing
+
+No side effects.
+
+
+==================================================
+8. TESTS
+==================================================
+
+Create:
+
+backend/tests/test_mock_normalizer.py
+
+Use the REAL MockAdapter to obtain test input.
+
+The primary test flow must be:
+
+MockAdapter
+    ↓ collect()
+raw listing
+    ↓
+MockNormalizer.normalize()
+    ↓
+NormalizedListing
+
+
+Verify:
+
+1. collect() provides at least one raw listing.
+
+2. MockNormalizer returns a dict.
+
+3. The result contains exactly the canonical NormalizedListing key set.
+
+4. Canonical values match the known MockAdapter fixture.
+
+5. asking_price_kopecks is an integer.
+
+6. asking_price_per_sqm_kopecks is an integer.
+
+7. area_sqm is positive.
+
+8. no database identifiers exist in the normalized payload.
+
+9. input raw dictionary is unchanged after normalize().
+
+Add focused invalid-input tests for:
+
+- missing/empty external_id;
+- missing/empty address;
+- area <= 0;
+- asking price <= 0.
+
+Keep tests deterministic.
+
+
+==================================================
+9. ARCHITECTURAL GUARDRAILS
+==================================================
+
+MockNormalizer must NOT:
+
+- access PostgreSQL;
+- import SQLAlchemy;
+- import ORM models;
+- persist anything;
+- create Source;
+- create Building;
+- create Property;
+- create Listing;
+- perform Building identity matching;
+- perform Property identity matching;
+- deduplicate listings;
+- geocode addresses;
+- make network/API requests;
+- select comparables;
+- calculate valuations.
+
+Do NOT modify:
+
+- Alembic;
+- database models;
+- migrations;
+- repositories;
+- ingestion service;
+- collectors;
+- SourceAdapter base interface;
+- requirements;
+- docker-compose.yml;
+- documentation.
+
+Do not commit.
+
+
+==================================================
+10. VALIDATION
+==================================================
+
+Run from the backend project context using the existing uv environment:
+
+pytest tests/test_normalizer_interface.py \
+       tests/test_mock_normalizer.py \
+       tests/test_source_adapter.py -q
+
+Then run:
+
+git diff --check
+
+
+Return:
+
+1. actual MockAdapter raw schema discovered during inspection;
+2. files created/modified;
+3. complete contents of backend/app/normalization/mock.py;
+4. complete contents of backend/tests/test_mock_normalizer.py;
+5. relevant change to normalization/__init__.py;
+6. pytest output;
+7. git diff --check result;
+8. git status --short.
+
+Do not commit.
+
+Stop after reporting.
