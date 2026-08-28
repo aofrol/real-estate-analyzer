@@ -1,0 +1,285 @@
+Task #5.2 — Define Canonical Normalized Listing Schema
+
+Goal:
+Define the framework-independent canonical dictionary schema produced by
+Normalizer implementations.
+
+This task defines the DATA CONTRACT only.
+
+Do NOT implement MockNormalizer yet.
+Do NOT implement normalization algorithms yet.
+
+
+CURRENT PIPELINE
+
+External Source
+    ↓
+SourceAdapter
+    ↓
+Collector
+    ↓
+IngestionService
+    ↓
+RawListingRepository
+    ↓
+raw_listings
+    ↓
+Normalizer
+    ↓
+Canonical NormalizedListing
+    ↓
+future entity matching / persistence
+
+
+==================================================
+1. SCOPE
+==================================================
+
+Modify only:
+
+backend/app/normalization/types.py
+backend/app/normalization/base.py
+backend/app/normalization/__init__.py
+backend/tests/test_normalizer_interface.py
+
+Create types.py if it does not exist.
+
+Do not modify any other project files.
+
+
+==================================================
+2. NORMALIZED LISTING TYPE
+==================================================
+
+Create a framework-independent TypedDict named:
+
+NormalizedListing
+
+Use Python standard library typing only.
+
+Do NOT use:
+- Pydantic;
+- dataclasses;
+- SQLAlchemy;
+- ORM models.
+
+NormalizedListing must represent canonical application-level listing data.
+
+Use clear canonical field names and explicit units.
+
+
+Required fields:
+
+external_id: str
+
+address: str
+
+area_sqm: float
+
+rooms: int | None
+
+is_studio: bool
+
+floor: int | None
+
+total_floors: int | None
+
+asking_price_kopecks: int
+
+asking_price_per_sqm_kopecks: int
+
+
+Optional / nullable canonical fields:
+
+city: str | None
+
+latitude: float | None
+
+longitude: float | None
+
+source_url: str | None
+
+building_type: str | None
+
+listed_at: datetime | None
+
+
+Use datetime from Python standard library.
+
+
+==================================================
+3. IMPORTANT SEMANTICS
+==================================================
+
+Document these rules:
+
+- money is represented in integer kopecks;
+- area is represented in square metres;
+- rooms represents room count;
+- studios use:
+    is_studio = True
+  and:
+    rooms = None
+- floor and total_floors may be unknown;
+- latitude and longitude may already be supplied by a source;
+- Normalizer does NOT perform geocoding;
+- source_url is an external listing URL if available;
+- external_id is the listing identity assigned by the external source.
+
+VERY IMPORTANT:
+
+Do NOT include:
+
+- source_id;
+- building_id;
+- property_id;
+- listing_id;
+- duplicate_of_id;
+- database UUIDs of any kind.
+
+Those values belong to persistence/entity matching layers, not normalization.
+
+
+==================================================
+4. UPDATE NORMALIZER CONTRACT
+==================================================
+
+Update:
+
+backend/app/normalization/base.py
+
+Change the return type of:
+
+normalize(...)
+
+from:
+
+dict[str, Any]
+
+to:
+
+NormalizedListing
+
+Input remains:
+
+dict[str, Any]
+
+The architectural boundary becomes:
+
+raw source dictionary
+        ↓
+Normalizer
+        ↓
+NormalizedListing
+
+Do not add implementation logic.
+
+
+==================================================
+5. EXPORT PUBLIC TYPES
+==================================================
+
+Update:
+
+backend/app/normalization/__init__.py
+
+Expose:
+
+Normalizer
+NormalizedListing
+
+Do not add side effects.
+
+
+==================================================
+6. UPDATE TEST
+==================================================
+
+Update:
+
+backend/tests/test_normalizer_interface.py
+
+The concrete test implementation should return a valid NormalizedListing.
+
+Use a complete example such as:
+
+external_id = "raw-001"
+address = "Москва, улица Ленина, 1"
+city = "Москва"
+area_sqm = 55.5
+rooms = 2
+is_studio = False
+floor = 5
+total_floors = 10
+asking_price_kopecks = 1_250_000_000
+asking_price_per_sqm_kopecks = 22_522_522
+latitude = None
+longitude = None
+source_url = None
+building_type = None
+listed_at = None
+
+Verify:
+
+1. Normalizer remains abstract.
+2. Concrete implementation can be instantiated.
+3. normalize() returns a dictionary-compatible NormalizedListing.
+4. Required canonical values are preserved.
+5. No database identifiers are present in the normalized payload.
+
+Do not test actual normalization logic yet.
+
+
+==================================================
+7. ARCHITECTURAL GUARDRAILS
+==================================================
+
+Do NOT:
+
+- create MockNormalizer;
+- access PostgreSQL;
+- import SQLAlchemy;
+- import application ORM models;
+- perform persistence;
+- perform geocoding;
+- perform Building matching;
+- perform Property matching;
+- perform Listing matching;
+- perform deduplication;
+- calculate valuation;
+- change migrations;
+- change repositories;
+- change source adapters;
+- change collectors;
+- change ingestion service.
+
+Do not commit.
+
+
+==================================================
+8. VALIDATION
+==================================================
+
+Run:
+
+pytest tests/test_normalizer_interface.py -q
+
+using the project's existing uv environment if required.
+
+Run:
+
+git diff --check
+
+
+Return:
+
+1. files created/modified;
+2. complete contents of normalization/types.py;
+3. complete contents of normalization/base.py;
+4. complete contents of normalization/__init__.py;
+5. complete contents of test_normalizer_interface.py;
+6. pytest result;
+7. git diff --check result;
+8. git status --short.
+
+Stop after reporting.
