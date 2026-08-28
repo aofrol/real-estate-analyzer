@@ -1,0 +1,723 @@
+Task #5.9 — Introduce Building Resolution Service
+
+Goal:
+Introduce an application-level service that decides whether a normalized
+listing resolves to an existing building or requires creation of a new
+building.
+
+This task adds orchestration only.
+
+Do NOT create Building ORM records yet.
+Do NOT write to PostgreSQL.
+Do NOT add a BuildingRepository yet.
+
+
+CURRENT FLOW
+
+NormalizedListing
+        ↓
+BuildingResolutionService
+        ↓
+BuildingMatcher
+        ↓
+BuildingMatchResult
+        ↓
+BuildingResolutionResult
+
+Possible outcomes:
+
+1. existing building resolved;
+2. new building creation required;
+3. ambiguous match requiring explicit handling.
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/matching/building.py
+backend/app/matching/candidates.py
+backend/app/matching/exact_building.py
+backend/app/matching/sqlalchemy_candidates.py
+backend/app/matching/__init__.py
+
+backend/app/normalization/types.py
+backend/app/models/building.py
+
+relevant matching tests.
+
+Report briefly:
+
+1. current BuildingMatcher contract;
+2. current BuildingMatchResult fields and reasons;
+3. current exact matcher outcomes;
+4. fields currently available in NormalizedListing that would be useful when
+   creating a future Building;
+5. whether any existing resolution/service abstraction already exists.
+
+Do not modify files before inspection.
+
+
+==================================================
+2. RESOLUTION RESULT TYPE
+==================================================
+
+Create:
+
+backend/app/resolution/__init__.py
+backend/app/resolution/building.py
+
+
+In building.py define:
+
+@dataclass(frozen=True, slots=True)
+class BuildingResolutionResult
+
+
+Fields:
+
+status: str
+
+building_key: str | None
+
+match_confidence: float
+
+reason: str
+
+
+Allowed status values for Task #5.9:
+
+"matched"
+"create_required"
+"ambiguous"
+
+
+Do NOT create an Enum yet.
+
+
+==================================================
+3. RESULT SEMANTICS
+==================================================
+
+STATUS: matched
+
+Meaning:
+The listing has been confidently resolved to an existing building.
+
+Requirements:
+
+building_key:
+    non-empty string
+
+match_confidence:
+    > 0.0 and <= 1.0
+
+
+STATUS: create_required
+
+Meaning:
+No existing candidate matched and future persistence should create a new
+Building.
+
+Requirements:
+
+building_key:
+    None
+
+match_confidence:
+    0.0
+
+
+STATUS: ambiguous
+
+Meaning:
+Candidates existed, but the matcher could not safely identify one building.
+
+Requirements:
+
+building_key:
+    None
+
+match_confidence:
+    0.0
+
+
+==================================================
+4. RESULT INVARIANTS
+==================================================
+
+Validate in __post_init__.
+
+Required rules:
+
+1. status must be exactly one of:
+
+   matched
+   create_required
+   ambiguous
+
+2. match_confidence must be numeric, finite, and between 0.0 and 1.0 inclusive;
+
+3. matched requires non-empty building_key;
+
+4. matched requires match_confidence > 0.0;
+
+5. create_required requires building_key is None;
+
+6. create_required requires match_confidence == 0.0;
+
+7. ambiguous requires building_key is None;
+
+8. ambiguous requires match_confidence == 0.0;
+
+9. reason must be a non-empty string.
+
+Raise ValueError with concise messages containing the relevant field name.
+
+Do not add other business logic to the dataclass.
+
+
+==================================================
+5. BUILDING RESOLUTION SERVICE
+==================================================
+
+In the same file define:
+
+class BuildingResolutionService
+
+
+Constructor:
+
+def __init__(
+    self,
+    matcher: BuildingMatcher,
+) -> None:
+    self._matcher = matcher
+
+
+Method:
+
+def resolve(
+    self,
+    listing: NormalizedListing,
+) -> BuildingResolutionResult:
+    ...
+
+
+The service must call:
+
+self._matcher.match(listing)
+
+exactly once.
+
+
+==================================================
+6. MAP MATCH RESULTS TO RESOLUTION RESULTS
+==================================================
+
+Use explicit deterministic mapping.
+
+
+CASE A — matcher returned matched=True
+
+Return:
+
+BuildingResolutionResult(
+    status="matched",
+    building_key=match_result.candidate_key,
+    match_confidence=match_result.confidence,
+    reason=match_result.reason,
+)
+
+
+Do not alter the matcher reason.
+
+
+==================================================
+7. CREATION-REQUIRED REASONS
+==================================================
+
+The following matcher reasons mean that there is no safe existing building and
+a new building may need to be created:
+
+"no_candidates"
+"no_exact_address_match"
+
+
+For either reason, if matched=False, return:
+
+BuildingResolutionResult(
+    status="create_required",
+    building_key=None,
+    match_confidence=0.0,
+    reason=<same matcher reason>,
+)
+
+
+Important:
+
+This task does NOT actually create the Building.
+
+
+==================================================
+8. AMBIGUOUS REASON
+==================================================
+
+The matcher reason:
+
+"ambiguous_exact_address"
+
+must map to:
+
+BuildingResolutionResult(
+    status="ambiguous",
+    building_key=None,
+    match_confidence=0.0,
+    reason="ambiguous_exact_address",
+)
+
+
+IMPORTANT:
+
+An ambiguous result must NOT be converted into create_required.
+
+Otherwise the system could create a duplicate Building when an existing
+building is already present but cannot be uniquely resolved.
+
+
+==================================================
+9. UNKNOWN MATCHER FAILURE REASON
+==================================================
+
+Do not silently treat unknown unmatched matcher reasons as create_required.
+
+If:
+
+match_result.matched is False
+
+and reason is not one of:
+
+"no_candidates"
+"no_exact_address_match"
+"ambiguous_exact_address"
+
+raise ValueError containing:
+
+reason
+
+
+This protects orchestration from silently misinterpreting future matcher
+behaviour.
+
+
+==================================================
+10. MATCHED RESULT CONSISTENCY
+==================================================
+
+BuildingMatchResult already validates its own invariants.
+
+Do not duplicate all of that validation.
+
+BuildingResolutionService may rely on its contract.
+
+It should only translate the result into application-level resolution state.
+
+
+==================================================
+11. IMPORTANT CREATION BOUNDARY
+==================================================
+
+BuildingResolutionService must NOT:
+
+- instantiate Building ORM objects;
+- add anything to a Session;
+- flush;
+- commit;
+- call a repository;
+- generate database UUIDs;
+- perform address normalization;
+- query candidates itself;
+- perform matching itself.
+
+It orchestrates:
+
+NormalizedListing
+        ↓
+BuildingMatcher
+        ↓
+BuildingResolutionResult
+
+only.
+
+
+==================================================
+12. WHY create_required IS NOT "created"
+==================================================
+
+Document this distinction clearly.
+
+create_required means:
+
+"No existing building was safely resolved, so a later persistence service may
+create one."
+
+It does NOT mean:
+
+"A Building row has already been created."
+
+Do not use status:
+
+"created"
+
+in Task #5.9.
+
+
+==================================================
+13. PUBLIC EXPORTS
+==================================================
+
+In:
+
+backend/app/resolution/__init__.py
+
+export:
+
+BuildingResolutionResult
+BuildingResolutionService
+
+using __all__.
+
+
+==================================================
+14. TESTS
+==================================================
+
+Create:
+
+backend/tests/test_building_resolution_service.py
+
+
+Use database-free fake BuildingMatcher implementations.
+
+Do NOT use SQLAlchemy.
+Do NOT use PostgreSQL.
+
+
+Create a valid NormalizedListing fixture.
+
+
+Required tests:
+
+
+TEST 1 — matched resolution
+
+Fake matcher returns:
+
+BuildingMatchResult(
+    matched=True,
+    candidate_key="building-001",
+    confidence=1.0,
+    reason="exact_address",
+)
+
+Expected:
+
+status == "matched"
+building_key == "building-001"
+match_confidence == 1.0
+reason == "exact_address"
+
+
+TEST 2 — matched tie-break resolution
+
+Matcher returns:
+
+matched=True
+candidate_key="building-002"
+confidence=0.95
+reason="exact_address_tiebreak"
+
+Expected status:
+
+"matched"
+
+and values preserved.
+
+
+TEST 3 — no candidates means create_required
+
+Matcher:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="no_candidates"
+
+Expected:
+
+status="create_required"
+
+
+TEST 4 — no exact address match means create_required
+
+Matcher reason:
+
+"no_exact_address_match"
+
+Expected:
+
+status="create_required"
+
+
+TEST 5 — ambiguous match stays ambiguous
+
+Matcher reason:
+
+"ambiguous_exact_address"
+
+Expected:
+
+status="ambiguous"
+
+NOT:
+
+"create_required"
+
+
+TEST 6 — unknown unmatched reason fails closed
+
+Matcher returns:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="future_unknown_reason"
+
+Expected:
+
+ValueError containing "reason".
+
+
+TEST 7 — matcher receives the same listing
+
+Verify the service forwards the exact NormalizedListing object to the matcher.
+
+
+TEST 8 — matcher called exactly once
+
+Use a fake matcher with a call counter.
+
+
+TEST 9 — result immutability
+
+BuildingResolutionResult must be frozen.
+
+
+TEST 10 — invalid status
+
+Anything outside:
+
+matched
+create_required
+ambiguous
+
+raises ValueError containing "status".
+
+
+TEST 11 — matched without building key
+
+Must raise ValueError containing "building_key".
+
+
+TEST 12 — matched with zero confidence
+
+Must raise ValueError containing "match_confidence".
+
+
+TEST 13 — create_required with building key
+
+Must raise ValueError containing "building_key".
+
+
+TEST 14 — create_required with non-zero confidence
+
+Must raise ValueError containing "match_confidence".
+
+
+TEST 15 — ambiguous with building key
+
+Must raise ValueError containing "building_key".
+
+
+TEST 16 — ambiguous with non-zero confidence
+
+Must raise ValueError containing "match_confidence".
+
+
+TEST 17 — invalid reason
+
+Empty/whitespace reason raises ValueError containing "reason".
+
+
+TEST 18 — invalid confidence
+
+Test at least:
+
+- negative;
+- > 1;
+- NaN;
+- infinity.
+
+Must raise ValueError containing "match_confidence".
+
+
+==================================================
+15. OPTIONAL INTEGRATION TEST
+==================================================
+
+Add one database-free integration test using:
+
+FakeCandidateProvider
+        ↓
+ExactBuildingMatcher
+        ↓
+BuildingResolutionService
+
+Verify an exact candidate resolves to:
+
+status="matched"
+
+Do not use SQLAlchemy for this test.
+
+
+==================================================
+16. ARCHITECTURAL GUARDRAILS
+==================================================
+
+The new resolution package must NOT import:
+
+- sqlalchemy;
+- app.models;
+- app.repositories;
+- app.database.
+
+It may import:
+
+app.matching
+app.normalization.types
+
+
+Do NOT:
+
+- modify matching behaviour;
+- modify canonicalize_address;
+- modify candidate provider;
+- modify NormalizedListing;
+- modify Normalizer;
+- modify ingestion;
+- modify models;
+- modify migrations;
+- create BuildingRepository;
+- persist Building;
+- persist Property;
+- persist Listing;
+- generate UUIDs for new buildings;
+- implement geocoding;
+- implement fuzzy matching;
+- add dependencies.
+
+Do not commit.
+
+
+==================================================
+17. FILE SCOPE
+==================================================
+
+Create only:
+
+backend/app/resolution/__init__.py
+backend/app/resolution/building.py
+backend/tests/test_building_resolution_service.py
+
+
+Do not modify existing files.
+
+If an import conflict makes that impossible:
+
+STOP and report the conflict instead of expanding scope.
+
+
+==================================================
+18. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_building_resolution_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then run:
+
+git diff --check
+
+
+Perform an import guardrail check confirming:
+
+backend/app/resolution/building.py
+
+does NOT import:
+
+sqlalchemy
+app.models
+app.repositories
+app.database
+
+
+==================================================
+19. REPORT
+==================================================
+
+Return:
+
+1. contracts discovered during inspection;
+
+2. files created;
+
+3. complete contents of:
+   backend/app/resolution/building.py
+
+4. complete contents of:
+   backend/app/resolution/__init__.py
+
+5. complete contents of:
+   backend/tests/test_building_resolution_service.py
+
+6. mapping table:
+
+   matcher result/reason
+        →
+   resolution status
+
+7. pytest result;
+
+8. git diff --check result;
+
+9. import guardrail result;
+
+10. git status --short.
+
+Do not commit.
+
+Stop after reporting.
