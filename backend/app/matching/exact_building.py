@@ -4,13 +4,9 @@ from __future__ import annotations
 
 from app.normalization.types import NormalizedListing
 
+from .address import canonicalize_address
 from .building import BuildingMatchResult, BuildingMatcher
 from .candidates import BuildingCandidate, BuildingCandidateProvider
-
-
-def _normalize_address(value: str) -> str:
-    """Apply the minimal MVP address normalization rules."""
-    return " ".join(value.strip().lower().split())
 
 
 class ExactBuildingMatcher(BuildingMatcher):
@@ -24,12 +20,12 @@ class ExactBuildingMatcher(BuildingMatcher):
         if not isinstance(address, str) or not address.strip():
             raise ValueError("address must be non-empty")
 
-        listing_address = _normalize_address(address)
+        listing_address = canonicalize_address(address)
         candidates = self._candidate_provider.get_candidates(listing)
         exact_candidates = [
             candidate
             for candidate in candidates
-            if _normalize_address(candidate.address_normalized) == listing_address
+            if canonicalize_address(candidate.address_normalized) == listing_address
         ]
 
         if not exact_candidates:

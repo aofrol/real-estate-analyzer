@@ -1,0 +1,717 @@
+Task #5.8 — SQLAlchemy Building Candidate Provider
+
+Goal:
+Connect the framework-independent building matching layer to the existing
+`buildings` table through a SQLAlchemy candidate provider.
+
+This task must:
+
+1. introduce one shared minimal address canonicalization helper;
+2. implement SQLAlchemyBuildingCandidateProvider;
+3. map ORM Building rows into framework-independent BuildingCandidate objects;
+4. keep ExactBuildingMatcher unchanged in behavior;
+5. perform candidate retrieval only — NOT the final matching decision.
+
+Do NOT implement fuzzy matching.
+Do NOT implement PostGIS distance matching.
+Do NOT create buildings.
+Do NOT modify database schema or migrations.
+
+
+CURRENT FLOW
+
+NormalizedListing
+        ↓
+SQLAlchemyBuildingCandidateProvider
+        ↓
+PostgreSQL / buildings
+        ↓
+BuildingCandidate[]
+        ↓
+ExactBuildingMatcher
+        ↓
+BuildingMatchResult
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/matching/candidates.py
+backend/app/matching/exact_building.py
+backend/app/matching/building.py
+backend/app/matching/__init__.py
+
+backend/app/models/building.py
+backend/app/database.py
+
+backend/app/repositories/sqlalchemy_raw_listing.py
+
+backend/app/normalization/types.py
+
+backend/tests/test_exact_building_matcher.py
+
+and inspect existing SQLAlchemy/session conventions in the project.
+
+Report before modifying:
+
+1. exact Building ORM field definitions;
+2. SQLAlchemy version/style currently used;
+3. how Session is injected in existing repository implementations;
+4. whether Building.location is Geography or Geometry;
+5. whether latitude/longitude are stored separately anywhere;
+6. current address normalization logic in ExactBuildingMatcher;
+7. whether any shared address utility already exists.
+
+Do not modify anything before this inspection is complete.
+
+
+==================================================
+2. SHARED ADDRESS CANONICALIZATION
+==================================================
+
+The minimal address normalization introduced in Task #5.7 is currently
+private to ExactBuildingMatcher.
+
+Avoid duplicating that logic in the SQLAlchemy provider.
+
+Create:
+
+backend/app/matching/address.py
+
+
+Define exactly one public function:
+
+def canonicalize_address(value: str) -> str:
+    ...
+
+
+Behavior must remain EXACTLY the same as Task #5.7:
+
+1. strip leading/trailing whitespace;
+2. lowercase;
+3. collapse repeated whitespace to one space.
+
+
+Example:
+
+"  Москва,   Улица Ленина, 1  "
+
+becomes:
+
+"москва, улица ленина, 1"
+
+
+Validation:
+
+If value is not a non-empty string, raise ValueError containing:
+
+address
+
+
+Do NOT:
+
+- remove punctuation;
+- normalize Russian abbreviations;
+- transliterate;
+- parse address components;
+- perform fuzzy logic;
+- use regex-heavy parsing;
+- call external services.
+
+
+==================================================
+3. UPDATE EXACT BUILDING MATCHER
+==================================================
+
+Modify:
+
+backend/app/matching/exact_building.py
+
+Replace the private `_normalize_address()` helper with:
+
+from .address import canonicalize_address
+
+
+The matching behavior must remain unchanged.
+
+No other matching logic changes are allowed.
+
+
+==================================================
+4. SQLALCHEMY CANDIDATE PROVIDER
+==================================================
+
+Create:
+
+backend/app/matching/sqlalchemy_candidates.py
+
+
+Implement:
+
+class SQLAlchemyBuildingCandidateProvider(BuildingCandidateProvider)
+
+
+Constructor:
+
+def __init__(self, session: Session) -> None:
+    self._session = session
+
+
+Use the project's existing SQLAlchemy Session import/style.
+
+
+==================================================
+5. PROVIDER RESPONSIBILITY
+==================================================
+
+The provider is responsible for:
+
+- querying plausible Building rows;
+- translating Building ORM rows into BuildingCandidate objects.
+
+The provider is NOT responsible for:
+
+- deciding whether a building matches;
+- assigning confidence;
+- creating BuildingMatchResult;
+- fuzzy matching;
+- geographic distance scoring;
+- creating or updating buildings;
+- transaction commits;
+- normalization of apartment attributes.
+
+
+==================================================
+6. MVP CANDIDATE QUERY
+==================================================
+
+Implement:
+
+get_candidates(
+    self,
+    listing: NormalizedListing,
+) -> list[BuildingCandidate]
+
+
+Use:
+
+listing["address"]
+
+as the required input.
+
+
+First canonicalize it with:
+
+canonicalize_address(...)
+
+
+Then retrieve candidate buildings using the existing:
+
+Building.address_normalized
+
+
+For Task #5.8 use a deterministic equality prefilter.
+
+The SQL query should conceptually be:
+
+Building.address_normalized == canonicalized listing address
+
+
+IMPORTANT:
+
+The stored `Building.address_normalized` may not always be canonicalized by the
+same helper historically.
+
+For this MVP task, assume the field represents canonical address data.
+
+Do NOT apply SQL LOWER(), regexp_replace(), fuzzy SQL operators, LIKE, ILIKE,
+or PostGIS search yet.
+
+We want a simple indexed equality path.
+
+
+==================================================
+7. OPTIONAL CITY FILTER
+==================================================
+
+If:
+
+listing["city"] is not None
+
+also apply exact equality:
+
+Building.city == listing["city"]
+
+
+If city is None:
+
+do not add a city predicate.
+
+
+Therefore:
+
+address is mandatory candidate prefilter.
+
+city is an optional narrowing predicate.
+
+
+Do NOT reject candidates using:
+
+- building_type;
+- floors_total;
+- coordinates.
+
+Those belong to the matcher tie-break strategy already implemented.
+
+
+==================================================
+8. SQLALCHEMY QUERY STYLE
+==================================================
+
+Use SQLAlchemy 2.x style if that is the project's current convention.
+
+Preferred shape:
+
+stmt = select(Building).where(...)
+
+rows = self._session.scalars(stmt).all()
+
+
+But follow actual project conventions discovered during inspection.
+
+Do not introduce legacy Query API if the project does not use it.
+
+
+==================================================
+9. DETERMINISTIC ORDER
+==================================================
+
+Candidate order must be deterministic.
+
+Add:
+
+ORDER BY Building.id ASC
+
+or the appropriate deterministic equivalent supported by the model.
+
+Do not depend on PostgreSQL natural row order.
+
+
+==================================================
+10. ORM → BUILDINGCANDIDATE MAPPING
+==================================================
+
+For every Building ORM row return:
+
+BuildingCandidate(
+    key=str(building.id),
+    address_normalized=building.address_normalized,
+    city=building.city,
+    latitude=...,
+    longitude=...,
+    building_type=building.building_type,
+    floors_total=building.floors_total,
+)
+
+
+==================================================
+11. LOCATION / POSTGIS RULE
+==================================================
+
+Inspect the actual Building.location field carefully.
+
+If the current project has a simple safe existing utility for extracting
+latitude/longitude from the Geography value without additional SQL queries,
+reuse it.
+
+Otherwise:
+
+For Task #5.8 set:
+
+latitude=None
+longitude=None
+
+
+Do NOT:
+
+- parse WKB manually;
+- parse WKT manually;
+- depend on GeoAlchemy internals;
+- issue ST_X/ST_Y;
+- issue ST_Longitude/ST_Latitude;
+- add a second SQL query;
+- add PostGIS-specific extraction logic.
+
+Coordinates are not used by ExactBuildingMatcher yet.
+
+We can add geographic candidate support in a later dedicated task.
+
+
+==================================================
+12. SESSION / TRANSACTION OWNERSHIP
+==================================================
+
+SQLAlchemyBuildingCandidateProvider must use an injected Session.
+
+It must NOT:
+
+- create a Session;
+- close the Session;
+- commit;
+- rollback;
+- flush.
+
+It is read-only candidate retrieval.
+
+
+==================================================
+13. PUBLIC EXPORTS
+==================================================
+
+Update:
+
+backend/app/matching/__init__.py
+
+Export:
+
+canonicalize_address
+SQLAlchemyBuildingCandidateProvider
+
+alongside the existing:
+
+BuildingCandidate
+BuildingCandidateProvider
+BuildingMatcher
+BuildingMatchResult
+ExactBuildingMatcher
+
+
+==================================================
+14. UNIT TESTS — DATABASE-FREE
+==================================================
+
+Create:
+
+backend/tests/test_sqlalchemy_building_candidate_provider.py
+
+
+Do NOT require a live PostgreSQL connection for the primary unit tests.
+
+Use a small fake Session/scalars result suitable for verifying:
+
+- statement execution;
+- ORM → BuildingCandidate mapping;
+- deterministic returned values.
+
+You MAY instantiate Building ORM objects directly if that does not require a
+database connection.
+
+Do NOT create a fake replacement ORM model.
+
+
+Required tests:
+
+
+TEST 1 — address canonicalization
+
+Verify:
+
+"  Москва,   Улица Ленина, 1 "
+
+becomes:
+
+"москва, улица ленина, 1"
+
+
+TEST 2 — invalid canonicalization input
+
+Empty and whitespace-only address raise ValueError containing "address".
+
+
+TEST 3 — provider maps Building to BuildingCandidate
+
+Create a Building object with:
+
+id=<known UUID>
+address_normalized="москва, улица ленина, 1"
+city="Москва"
+building_type="brick"
+floors_total=10
+
+Verify candidate:
+
+key == str(building.id)
+address_normalized == ...
+city == ...
+building_type == ...
+floors_total == ...
+latitude is None
+longitude is None
+
+unless an already existing safe coordinate utility was discovered.
+
+
+TEST 4 — provider returns multiple rows
+
+Fake Session returns two Building rows.
+
+Verify two BuildingCandidate values are returned in the same deterministic
+database-result order.
+
+
+TEST 5 — empty result
+
+Provider returns [].
+
+
+TEST 6 — session is injected
+
+Verify provider uses the supplied session and does not create its own session.
+
+
+TEST 7 — no persistence side effects
+
+Verify provider does not call:
+
+commit
+flush
+rollback
+
+during get_candidates().
+
+
+TEST 8 — exact matcher integration
+
+Use:
+
+SQLAlchemyBuildingCandidateProvider(fake_session)
+
+inside:
+
+ExactBuildingMatcher(provider)
+
+with a fake Building row matching the normalized listing address.
+
+Verify:
+
+matched=True
+candidate_key=str(building.id)
+reason="exact_address"
+
+
+==================================================
+15. VERIFY SQL QUERY SEMANTICS
+==================================================
+
+Add focused tests or statement inspection to verify:
+
+When city is present:
+
+WHERE includes:
+
+Building.address_normalized == canonical_address
+
+AND:
+
+Building.city == listing city
+
+
+When city is None:
+
+WHERE includes only address_normalized equality.
+
+
+Do not rely on fragile full SQL string equality if SQLAlchemy renders aliases
+or parameters differently.
+
+Use a stable inspection approach consistent with SQLAlchemy testing.
+
+
+==================================================
+16. IMPORTANT ARCHITECTURAL NOTE
+==================================================
+
+There is a subtle distinction:
+
+NormalizedListing.address
+    = canonical source-level address string available after normalization
+
+Building.address_normalized
+    = persisted building identity address
+
+
+For the current MVP we assume that both can be compared after applying the
+shared minimal `canonicalize_address()` rule to the listing address.
+
+Do NOT redesign NormalizedListing in this task.
+
+Do NOT add address_normalized to NormalizedListing yet.
+
+
+==================================================
+17. DO NOT IMPLEMENT BUILDING CREATION
+==================================================
+
+If no candidates exist:
+
+SQLAlchemyBuildingCandidateProvider returns [].
+
+It must NOT create a Building.
+
+Future orchestration will decide:
+
+match existing building
+OR
+create new building
+
+
+That is NOT part of Task #5.8.
+
+
+==================================================
+18. ARCHITECTURAL GUARDRAILS
+==================================================
+
+Do NOT:
+
+- modify Building model;
+- modify Property model;
+- modify Listing model;
+- modify RawListing;
+- modify NormalizedListing;
+- modify Normalizer;
+- modify NormalizationService;
+- modify ingestion;
+- modify SourceAdapter;
+- modify Collector;
+- modify migrations;
+- modify Alembic;
+- modify database constraints;
+- create BuildingRepository;
+- create buildings;
+- update buildings;
+- implement fuzzy matching;
+- implement PostGIS distance matching;
+- implement coordinate matching;
+- implement duplicate detection;
+- implement PropertyMatcher;
+- persist normalized listings;
+- add dependencies.
+
+Do not commit.
+
+
+==================================================
+19. FILE SCOPE
+==================================================
+
+Create:
+
+backend/app/matching/address.py
+backend/app/matching/sqlalchemy_candidates.py
+backend/tests/test_sqlalchemy_building_candidate_provider.py
+
+Modify:
+
+backend/app/matching/exact_building.py
+backend/app/matching/__init__.py
+
+
+Do not modify other files.
+
+If the actual existing project structure requires expanding scope:
+
+STOP and report the conflict before making unrelated changes.
+
+
+==================================================
+20. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then run:
+
+git diff --check
+
+
+Also perform import checks:
+
+A. These framework-independent files must NOT import SQLAlchemy:
+
+backend/app/matching/address.py
+backend/app/matching/building.py
+backend/app/matching/candidates.py
+backend/app/matching/exact_building.py
+
+
+B. Only:
+
+backend/app/matching/sqlalchemy_candidates.py
+
+may import:
+
+sqlalchemy
+app.models.building
+
+
+==================================================
+21. REPORT
+==================================================
+
+Return:
+
+1. inspection findings:
+   - Building ORM fields;
+   - session convention;
+   - location representation;
+   - existing address normalization;
+
+2. exact SQLAlchemy candidate query strategy;
+
+3. coordinate mapping decision and why;
+
+4. files created/modified;
+
+5. complete contents of:
+   backend/app/matching/address.py
+
+6. complete contents of:
+   backend/app/matching/sqlalchemy_candidates.py
+
+7. complete updated contents of:
+   backend/app/matching/exact_building.py
+
+8. complete contents of:
+   backend/tests/test_sqlalchemy_building_candidate_provider.py
+
+9. SQL query semantic verification results:
+   - address + city;
+   - address only;
+
+10. pytest result;
+
+11. git diff --check result;
+
+12. import guardrail results;
+
+13. git status --short.
+
+Do not commit.
+
+Stop after reporting.
