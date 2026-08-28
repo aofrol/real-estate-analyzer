@@ -43,6 +43,7 @@ def test_mock_adapter_payload_normalizes_to_canonical_listing() -> None:
     assert normalized["source_url"] == "https://example.invalid/listings/mock-001"
     assert normalized["building_type"] is None
     assert normalized["listed_at"] is None
+    assert raw_listing["currency"] == "RUB"
     assert not {
         "source_id",
         "building_id",
@@ -51,6 +52,28 @@ def test_mock_adapter_payload_normalizes_to_canonical_listing() -> None:
         "duplicate_of_id",
     }.intersection(normalized)
     assert raw_listing == original_raw_listing
+
+
+def test_mock_normalizer_accepts_rub_currency() -> None:
+    normalized = MockNormalizer().normalize(_mock_raw_listing())
+
+    assert normalized["asking_price_kopecks"] == 1_250_000_000
+
+
+def test_mock_normalizer_rejects_missing_currency() -> None:
+    raw_listing = _mock_raw_listing()
+    raw_listing.pop("currency")
+
+    with pytest.raises(ValueError, match="currency"):
+        MockNormalizer().normalize(raw_listing)
+
+
+def test_mock_normalizer_rejects_unsupported_currency() -> None:
+    raw_listing = _mock_raw_listing()
+    raw_listing["currency"] = "USD"
+
+    with pytest.raises(ValueError, match="currency"):
+        MockNormalizer().normalize(raw_listing)
 
 
 def test_mock_normalizer_rejects_missing_external_id() -> None:

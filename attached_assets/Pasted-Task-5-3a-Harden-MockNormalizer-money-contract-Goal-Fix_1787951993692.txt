@@ -1,0 +1,135 @@
+Task #5.3a — Harden MockNormalizer money contract
+
+Goal:
+Fix two small money-contract issues discovered during review of Task #5.3.
+
+This is a narrowly scoped correction.
+
+Modify only:
+
+backend/app/normalization/mock.py
+backend/tests/test_mock_normalizer.py
+
+Do not modify any other files.
+
+
+==================================================
+1. CURRENCY VALIDATION
+==================================================
+
+The actual MockAdapter payload includes:
+
+currency = "RUB"
+
+MockNormalizer currently converts price to kopecks without validating currency.
+
+Add explicit validation:
+
+- currency must be exactly "RUB";
+- missing currency must raise ValueError;
+- unsupported currency must raise ValueError.
+
+Use a concise error message containing "currency".
+
+Do NOT implement currency conversion.
+Do NOT call external FX services.
+
+
+==================================================
+2. PRICE PER SQM ROUNDING
+==================================================
+
+Standardize canonical price-per-square-metre calculation.
+
+Current example:
+
+asking_price_kopecks = 1_250_000_000
+area_sqm = 55.5
+
+Canonical result must be:
+
+22_522_523 kopecks per sqm
+
+Use Decimal arithmetic and ROUND_HALF_UP.
+
+Do not use float round() for the monetary calculation.
+
+The intended rule is:
+
+asking_price_per_sqm_kopecks =
+    total asking price in kopecks / area in sqm
+    rounded to the nearest integer kopeck using ROUND_HALF_UP.
+
+
+==================================================
+3. PRESERVE EXISTING BEHAVIOR
+==================================================
+
+Do not change:
+
+- NormalizedListing schema;
+- MockAdapter;
+- Normalizer interface;
+- database models;
+- migrations;
+- repositories;
+- ingestion;
+- collectors.
+
+MockNormalizer must remain:
+- framework-independent;
+- database-independent;
+- deterministic;
+- non-mutating.
+
+
+==================================================
+4. TESTS
+==================================================
+
+Update backend/tests/test_mock_normalizer.py.
+
+Keep the existing expected canonical value:
+
+asking_price_per_sqm_kopecks == 22_522_523
+
+Add tests verifying:
+
+1. currency == "RUB" succeeds;
+
+2. missing currency raises ValueError containing "currency";
+
+3. unsupported currency, for example "USD", raises ValueError containing "currency";
+
+4. price-per-sqm is an int;
+
+5. the known fixture calculation remains exactly:
+   22_522_523.
+
+
+==================================================
+5. VALIDATION
+==================================================
+
+Run:
+
+pytest tests/test_normalizer_interface.py \
+       tests/test_mock_normalizer.py \
+       tests/test_source_adapter.py -q
+
+Run:
+
+git diff --check
+
+
+Return:
+
+1. exact diff for normalization/mock.py;
+2. exact diff for test_mock_normalizer.py;
+3. pytest result;
+4. git diff --check result;
+5. git status --short.
+
+Do not commit.
+
+Stop after reporting.

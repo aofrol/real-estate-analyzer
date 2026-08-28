@@ -24,6 +24,9 @@ class MockNormalizer(Normalizer):
         if not isinstance(address, str) or not address.strip():
             raise ValueError("address must be non-empty")
 
+        if raw_listing.get("currency") != "RUB":
+            raise ValueError("currency must be RUB")
+
         try:
             area_sqm = float(raw_listing["area"])
         except (KeyError, TypeError, ValueError):
@@ -67,8 +70,10 @@ class MockNormalizer(Normalizer):
             "floor": raw_listing.get("floor"),
             "total_floors": raw_listing.get("total_floors"),
             "asking_price_kopecks": asking_price_kopecks,
-            "asking_price_per_sqm_kopecks": round(
-                asking_price_kopecks / area_sqm
+            "asking_price_per_sqm_kopecks": int(
+                (Decimal(asking_price_kopecks) / Decimal(str(area_sqm))).to_integral_value(
+                    rounding=ROUND_HALF_UP
+                )
             ),
             "latitude": raw_listing.get("latitude"),
             "longitude": raw_listing.get("longitude"),
