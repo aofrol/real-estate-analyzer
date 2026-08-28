@@ -1,0 +1,486 @@
+Task #5.11 — Property Identity Contract
+
+Goal:
+Introduce a framework-independent contract for identifying whether a
+NormalizedListing refers to an existing Property inside a known Building.
+
+This task defines identity semantics only.
+
+Do NOT query PostgreSQL.
+Do NOT use SQLAlchemy.
+Do NOT create Property ORM rows.
+Do NOT persist Listings.
+Do NOT implement fuzzy identity logic yet.
+
+
+CURRENT DOMAIN FLOW
+
+NormalizedListing
+        ↓
+Building resolved / persisted
+        ↓
+building_key
+        ↓
+Property identity decision
+        ↓
+PropertyMatchResult
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/models/property.py
+backend/app/models/building.py
+backend/app/models/listing.py
+
+backend/app/normalization/types.py
+
+backend/app/matching/building.py
+backend/app/matching/candidates.py
+backend/app/resolution/building.py
+backend/app/persistence/building.py
+
+existing tests and package naming conventions.
+
+Report:
+
+1. exact Property ORM fields;
+2. required/non-null Property fields;
+3. Property → Building relationship / FK;
+4. which NormalizedListing fields overlap with Property fields;
+5. whether Property has any stable identity field such as:
+   - apartment number;
+   - cadastral number;
+   - external property ID;
+6. whether any unique constraint currently defines Property identity;
+7. whether any existing Property matcher/repository/service exists.
+
+Do not modify anything before inspection.
+
+
+==================================================
+2. IMPORTANT IDENTITY PRINCIPLE
+==================================================
+
+For Task #5.11 do NOT claim that area + rooms + floor uniquely identify a
+physical apartment.
+
+These attributes may be useful for candidate similarity, but are not a safe
+global identity key.
+
+The contract must distinguish:
+
+A. confidently matched existing Property;
+B. no safe match;
+C. ambiguous possible matches.
+
+
+==================================================
+3. CREATE PACKAGE FILE
+==================================================
+
+Create:
+
+backend/app/matching/property.py
+
+
+Define:
+
+@dataclass(frozen=True, slots=True)
+class PropertyMatchResult
+
+
+Fields:
+
+matched: bool
+
+candidate_key: str | None
+
+confidence: float
+
+reason: str
+
+
+Use semantics consistent with BuildingMatchResult, but keep Property as a
+separate contract.
+
+
+==================================================
+4. PROPERTY MATCH RESULT INVARIANTS
+==================================================
+
+Validate in __post_init__:
+
+1. confidence must be numeric, finite, and between 0.0 and 1.0 inclusive;
+
+2. matched=True requires candidate_key to be a non-empty string;
+
+3. matched=False requires candidate_key is None;
+
+4. reason must be a non-empty string.
+
+Raise ValueError containing the relevant field name.
+
+
+==================================================
+5. PROPERTY MATCHER CONTRACT
+==================================================
+
+In the same file define:
+
+class PropertyMatcher(ABC)
+
+
+Method:
+
+@abstractmethod
+def match(
+    self,
+    *,
+    listing: NormalizedListing,
+    building_key: str,
+) -> PropertyMatchResult:
+    ...
+
+
+The matcher receives:
+
+listing
+    normalized source listing data
+
+building_key
+    already resolved persisted Building identity
+
+
+==================================================
+6. BUILDING KEY VALIDATION BOUNDARY
+==================================================
+
+The abstract PropertyMatcher contract itself must NOT parse UUIDs.
+
+building_key is framework-independent string identity.
+
+Concrete SQLAlchemy implementations may later interpret it as UUID.
+
+Do not couple this contract to database types.
+
+
+==================================================
+7. PROPERTY MATCHER RESPONSIBILITY
+==================================================
+
+PropertyMatcher is responsible only for deciding whether a listing corresponds
+to a known Property candidate within the already-resolved Building.
+
+It is NOT responsible for:
+
+- building matching;
+- building persistence;
+- loading ORM models;
+- creating Property;
+- updating Property;
+- creating Listing;
+- source ingestion;
+- normalization;
+- deduplication;
+- valuation.
+
+
+==================================================
+8. IDENTITY SIGNALS
+==================================================
+
+Inspect Property ORM and NormalizedListing fields.
+
+Document which signals are potentially useful.
+
+Expected examples may include:
+
+- floor;
+- rooms;
+- is_studio;
+- area_sqm.
+
+But do NOT assume all of them exist until inspection confirms it.
+
+
+==================================================
+9. IDENTITY SAFETY RULE
+==================================================
+
+Explicitly document in PropertyMatcher docstring:
+
+For current MVP data, apartment attributes such as:
+
+- floor;
+- rooms;
+- studio status;
+- area
+
+are descriptive attributes and may help compare candidates, but they are not
+guaranteed unique identifiers of a physical apartment.
+
+Therefore a future matcher must be allowed to return ambiguous rather than
+forcing a match.
+
+
+==================================================
+10. REASON STRINGS
+==================================================
+
+Do not create an Enum yet.
+
+Tests may use example reasons:
+
+"exact_property_identity"
+"no_property_candidates"
+"ambiguous_property_candidates"
+
+but the abstract contract must not hard-code allowed reason values.
+
+
+==================================================
+11. PUBLIC EXPORTS
+==================================================
+
+Update:
+
+backend/app/matching/__init__.py
+
+Export:
+
+PropertyMatcher
+PropertyMatchResult
+
+alongside existing matching exports.
+
+
+==================================================
+12. TESTS
+==================================================
+
+Create:
+
+backend/tests/test_property_matcher_contract.py
+
+
+Required tests:
+
+
+TEST 1 — PropertyMatcher is abstract
+
+Direct instantiation raises TypeError.
+
+
+TEST 2 — concrete test matcher works
+
+Create minimal concrete matcher returning:
+
+PropertyMatchResult(
+    matched=True,
+    candidate_key="property-test-001",
+    confidence=1.0,
+    reason="exact_property_identity",
+)
+
+
+TEST 3 — valid matched result
+
+Verify fields preserved.
+
+
+TEST 4 — valid unmatched result
+
+Example:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="no_property_candidates"
+
+
+TEST 5 — confidence below zero invalid
+
+
+TEST 6 — confidence above one invalid
+
+
+TEST 7 — NaN invalid
+
+
+TEST 8 — infinity invalid
+
+
+TEST 9 — matched requires candidate_key
+
+
+TEST 10 — matched rejects empty/whitespace candidate_key
+
+
+TEST 11 — unmatched forbids candidate_key
+
+
+TEST 12 — reason required
+
+
+TEST 13 — result immutable
+
+
+TEST 14 — building_key passes through unchanged
+
+Concrete test matcher should record the received building_key.
+
+Verify exact same string is received.
+
+
+TEST 15 — same NormalizedListing object forwarded
+
+Concrete matcher records listing object.
+
+Verify identity with `is`.
+
+
+==================================================
+13. NORMALIZED LISTING FIXTURE
+==================================================
+
+Use a valid current NormalizedListing fixture.
+
+Do not modify NormalizedListing definition.
+
+Do not add Property-specific fields to it.
+
+
+==================================================
+14. ARCHITECTURAL GUARDRAILS
+==================================================
+
+backend/app/matching/property.py must NOT import:
+
+- sqlalchemy;
+- app.models;
+- app.repositories;
+- app.database.
+
+It may import only:
+
+- standard library;
+- app.normalization.types.
+
+
+Do NOT:
+
+- implement SQLAlchemyPropertyMatcher;
+- implement PropertyCandidate yet;
+- query DB;
+- create repository;
+- create persistence service;
+- parse UUIDs;
+- change Property model;
+- change Listing model;
+- change Building model;
+- modify migrations;
+- modify normalization;
+- modify resolution;
+- modify persistence;
+- add dependencies.
+
+Do not commit.
+
+
+==================================================
+15. FILE SCOPE
+==================================================
+
+Create:
+
+backend/app/matching/property.py
+backend/tests/test_property_matcher_contract.py
+
+Modify only:
+
+backend/app/matching/__init__.py
+
+Do not modify other files.
+
+If inspection reveals a conflict that requires broader changes:
+
+STOP and report it before modifying unrelated files.
+
+
+==================================================
+16. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_property_matcher_contract.py \
+    tests/test_building_persistence_service.py \
+    tests/test_building_resolution_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then:
+
+git diff --check
+
+
+Run import guardrail confirming:
+
+backend/app/matching/property.py
+
+does NOT import:
+
+sqlalchemy
+app.models
+app.repositories
+app.database
+
+
+==================================================
+17. REPORT
+==================================================
+
+Return:
+
+1. Property ORM inspection findings;
+
+2. available Property identity signals;
+
+3. explicit statement whether current schema has a truly stable apartment
+   identity field;
+
+4. files created/modified;
+
+5. complete contents of:
+   backend/app/matching/property.py
+
+6. complete updated contents of:
+   backend/app/matching/__init__.py
+
+7. complete contents of:
+   backend/tests/test_property_matcher_contract.py
+
+8. pytest result;
+
+9. git diff --check result;
+
+10. import guardrail result;
+
+11. git status --short.
+
+Do not commit.
+
+Stop after reporting.
