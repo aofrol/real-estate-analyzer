@@ -1,0 +1,447 @@
+Task #5.4 — Introduce Normalization Service Boundary
+
+Goal:
+Create a small application-level service that converts a persisted raw listing
+record into the framework-independent input expected by Normalizer.
+
+This task defines the boundary between:
+
+raw_listings persistence
+        ↓
+NormalizationService
+        ↓
+Normalizer
+        ↓
+NormalizedListing
+
+The Normalizer itself must remain completely unaware of SQLAlchemy and ORM models.
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect the current implementations of:
+
+backend/app/models/raw_listing.py
+backend/app/normalization/base.py
+backend/app/normalization/types.py
+backend/app/normalization/mock.py
+backend/app/ingestion/service.py
+backend/app/repositories/raw_listing.py
+backend/app/repositories/sqlalchemy_raw_listing.py
+
+Also inspect relevant tests.
+
+Determine the ACTUAL current RawListing model fields.
+
+In particular, identify where these values currently live:
+
+- source_id
+- external_id
+- raw_data
+- collected_at / created_at if present
+
+Do not guess.
+
+Briefly report the discovered RawListing schema before editing.
+
+
+==================================================
+2. ARCHITECTURAL RULE
+==================================================
+
+The normalization layer remains framework-independent.
+
+Therefore:
+
+Normalizer.normalize(...)
+
+must continue receiving:
+
+dict[str, Any]
+
+and must NOT receive:
+
+- SQLAlchemy ORM objects;
+- Session;
+- repositories;
+- database UUIDs;
+- RawListing model instances.
+
+Do not modify the Normalizer interface.
+
+
+==================================================
+3. CREATE NORMALIZATION SERVICE
+==================================================
+
+Create:
+
+backend/app/normalization/service.py
+
+Implement:
+
+class NormalizationService
+
+Constructor:
+
+def __init__(self, normalizer: Normalizer) -> None
+
+Store the injected normalizer.
+
+Expose one method:
+
+normalize_raw_listing(...)
+
+The method should accept only the minimum values needed from a persisted raw
+listing record.
+
+Preferred framework-independent signature:
+
+def normalize_raw_listing(
+    self,
+    *,
+    external_id: str,
+    raw_data: dict[str, Any],
+) -> NormalizedListing:
+
+Do NOT accept a SQLAlchemy RawListing object.
+
+Do NOT accept source_id.
+
+Do NOT accept Session or repository objects.
+
+
+==================================================
+4. RAW PAYLOAD RECONSTRUCTION
+==================================================
+
+The persisted raw listing has:
+
+- external_id stored as an application/database column;
+- raw_data stored as the immutable/raw source payload.
+
+The service must construct a NEW dictionary for the Normalizer.
+
+Rules:
+
+1. start from a shallow copy of raw_data;
+
+2. ensure external_id passed to Normalizer comes from the persisted
+   external_id argument;
+
+3. do NOT mutate raw_data;
+
+4. do NOT inject source_id;
+
+5. do NOT inject any database UUID;
+
+6. do NOT inject ORM metadata;
+
+7. call:
+
+   self._normalizer.normalize(normalizer_input)
+
+8. return the resulting NormalizedListing.
+
+
+==================================================
+5. EXTERNAL_ID OWNERSHIP RULE
+==================================================
+
+This is important.
+
+The database column external_id is authoritative at this boundary.
+
+If raw_data also contains "external_id", do NOT trust it.
+
+NormalizationService must overwrite it with the persisted external_id argument.
+
+Example:
+
+external_id argument:
+"mock-001"
+
+raw_data:
+{
+    "external_id": "wrong-value",
+    ...
+}
+
+Normalizer must receive:
+
+{
+    "external_id": "mock-001",
+    ...
+}
+
+This prevents divergence between persisted listing identity and duplicated
+identity inside raw JSON.
+
+
+==================================================
+6. SOURCE_ID RULE
+==================================================
+
+Do NOT pass source_id into Normalizer.
+
+source_id is an internal persistence/application identity and is not part of
+the canonical normalized listing.
+
+Do not modify NormalizedListing to include source_id.
+
+Do not modify MockNormalizer to know about source_id.
+
+
+==================================================
+7. VALIDATION
+==================================================
+
+NormalizationService should perform only boundary-level validation.
+
+At minimum:
+
+- external_id must be a non-empty string;
+- raw_data must be a dictionary.
+
+Raise:
+
+ValueError
+
+with concise messages for invalid input.
+
+Do not duplicate MockNormalizer's domain validation.
+
+For example, address/area/price validation remains the Normalizer's
+responsibility.
+
+
+==================================================
+8. PUBLIC EXPORT
+==================================================
+
+Update:
+
+backend/app/normalization/__init__.py
+
+Export:
+
+NormalizationService
+
+alongside the existing:
+
+Normalizer
+NormalizedListing
+MockNormalizer
+
+No side effects.
+
+
+==================================================
+9. TESTS
+==================================================
+
+Create:
+
+backend/tests/test_normalization_service.py
+
+
+Use a small fake Normalizer to verify the boundary behavior.
+
+Do NOT use PostgreSQL.
+Do NOT use SQLAlchemy.
+Do NOT instantiate ORM models.
+
+
+Required tests:
+
+
+TEST 1 — passes raw data into Normalizer
+
+Given:
+
+external_id = "mock-001"
+
+raw_data contains representative MockAdapter-style fields.
+
+Verify the fake Normalizer receives a dictionary containing the raw fields.
+
+
+TEST 2 — persisted external_id is authoritative
+
+Given:
+
+external_id argument:
+"persisted-001"
+
+raw_data:
+{
+    "external_id": "payload-999",
+    ...
+}
+
+Verify the Normalizer receives:
+
+external_id == "persisted-001"
+
+
+TEST 3 — raw_data is not mutated
+
+Keep a deepcopy of raw_data.
+
+Call normalize_raw_listing().
+
+Verify original raw_data remains unchanged.
+
+
+TEST 4 — source_id/database identifiers do not appear
+
+Use raw_data without DB identifiers.
+
+Verify service itself does not add:
+
+source_id
+building_id
+property_id
+listing_id
+duplicate_of_id
+
+
+TEST 5 — result is returned unchanged
+
+Have FakeNormalizer return a known valid NormalizedListing.
+
+Verify NormalizationService returns that result.
+
+
+TEST 6 — invalid external_id
+
+Test:
+
+- empty string;
+- whitespace-only string;
+- non-string if practical.
+
+Must raise ValueError containing "external_id".
+
+
+TEST 7 — invalid raw_data
+
+If runtime allows passing an invalid value despite the type annotation,
+verify a non-dictionary raises ValueError containing "raw_data".
+
+
+==================================================
+10. OPTIONAL INTEGRATION TEST WITH MOCK NORMALIZER
+==================================================
+
+If it remains simple and deterministic, add one test using:
+
+MockAdapter
+    ↓
+raw payload
+    ↓
+NormalizationService(MockNormalizer)
+    ↓
+NormalizedListing
+
+Simulate persistence by separating:
+
+external_id = raw["external_id"]
+
+raw_data = copy of raw payload
+
+Then call:
+
+NormalizationService(MockNormalizer()).normalize_raw_listing(...)
+
+Verify canonical output contains:
+
+external_id == "mock-001"
+asking_price_kopecks == 1_250_000_000
+asking_price_per_sqm_kopecks == 22_522_523
+
+This test must remain database-free.
+
+
+==================================================
+11. DO NOT CHANGE INGESTION YET
+==================================================
+
+Very important:
+
+Do NOT modify:
+
+backend/app/ingestion/service.py
+
+in this task.
+
+We have a known architectural question around ownership of source_id in the
+ingestion layer.
+
+Do not mix that refactor into Task #5.4.
+
+We will address it separately after the normalization boundary is stable.
+
+
+==================================================
+12. ARCHITECTURAL GUARDRAILS
+==================================================
+
+Do NOT:
+
+- import SQLAlchemy into normalization/service.py;
+- import ORM models into normalization/service.py;
+- access PostgreSQL;
+- create repositories;
+- modify repositories;
+- modify migrations;
+- modify database models;
+- perform Building matching;
+- perform Property matching;
+- persist normalized results;
+- perform listing upsert;
+- deduplicate listings;
+- geocode;
+- call external APIs;
+- calculate valuation;
+- calculate comparables;
+- introduce Pydantic;
+- introduce new dependencies.
+
+Do not commit.
+
+
+==================================================
+13. VALIDATION
+==================================================
+
+Run:
+
+pytest tests/test_normalizer_interface.py \
+       tests/test_mock_normalizer.py \
+       tests/test_normalization_service.py \
+       tests/test_source_adapter.py -q
+
+using the project's existing uv environment.
+
+Then run:
+
+git diff --check
+
+
+Return:
+
+1. RawListing model/schema discovered during inspection;
+2. files created/modified;
+3. complete contents of backend/app/normalization/service.py;
+4. complete contents of backend/tests/test_normalization_service.py;
+5. relevant change to backend/app/normalization/__init__.py;
+6. pytest result;
+7. git diff --check result;
+8. git status --short.
+
+Do not commit.
+
+Stop after reporting.
