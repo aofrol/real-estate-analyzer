@@ -1,0 +1,430 @@
+Task #5.5 — Harden Ingestion Contracts
+
+Goal:
+Clean up the ingestion boundary before building entity matching.
+
+Fix exactly two architectural issues:
+
+1. source_id ownership must belong to application/persistence orchestration,
+   not to the external raw payload;
+
+2. RawListingRepository.save() must have one consistent return contract across
+   the abstract interface and SQLAlchemy implementation.
+
+Do not add new product functionality.
+
+
+CURRENT FLOW
+
+SourceAdapter
+    ↓
+Collector
+    ↓
+raw external dictionary
+    ↓
+IngestionService
+    ↓
+RawListingRepository
+    ↓
+raw_listings
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/ingestion/service.py
+
+backend/app/repositories/raw_listing.py
+backend/app/repositories/sqlalchemy_raw_listing.py
+
+backend/app/models/raw_listing.py
+
+backend/app/collector/base.py
+backend/app/collector/mock.py
+
+backend/app/sources/base.py
+backend/app/sources/mock.py
+
+all ingestion/repository tests currently present.
+
+Report the ACTUAL current contracts before changing anything.
+
+Specifically report:
+
+1. current IngestionService constructor;
+2. current ingestion method signature;
+3. where source_id currently comes from;
+4. current RawListingRepository.save() signature and return annotation;
+5. current SQLAlchemyRawListingRepository.save() signature and actual return value.
+
+
+==================================================
+2. SOURCE_ID OWNERSHIP
+==================================================
+
+source_id is an internal database/application identifier.
+
+It must NOT come from:
+
+- SourceAdapter;
+- Collector;
+- raw external payload.
+
+It must be supplied explicitly to IngestionService by application orchestration.
+
+
+Update IngestionService so that source_id is injected explicitly.
+
+Preferred design:
+
+class IngestionService:
+
+    def __init__(
+        self,
+        collector: Collector,
+        repository: RawListingRepository,
+        source_id: UUID,
+    ) -> None:
+        ...
+
+
+Use UUID from Python standard library.
+
+
+The service should store:
+
+self._source_id
+
+
+Do NOT require each raw payload to contain source_id.
+
+
+==================================================
+3. INGESTION MAPPING
+==================================================
+
+For every collected raw listing:
+
+external_id must still come from the external payload.
+
+raw_data must preserve the external payload.
+
+Repository persistence should conceptually receive:
+
+source_id=self._source_id
+external_id=<external payload external_id>
+raw_data=<external payload>
+
+
+IMPORTANT:
+
+Do NOT inject source_id into raw_data.
+
+raw_data must remain source data, not database metadata.
+
+
+==================================================
+4. EXTERNAL_ID VALIDATION
+==================================================
+
+At the ingestion boundary:
+
+external_id must exist in the collected raw payload and must be a non-empty
+string.
+
+If invalid, raise ValueError containing:
+
+external_id
+
+Keep validation narrow.
+
+Do not duplicate normalization validation for:
+
+- address;
+- area;
+- price;
+- rooms;
+- currency.
+
+Those belong later in normalization.
+
+
+==================================================
+5. RAW LISTING REPOSITORY CONTRACT
+==================================================
+
+Inspect the current mismatch between:
+
+RawListingRepository.save()
+
+and:
+
+SQLAlchemyRawListingRepository.save()
+
+
+Choose one consistent contract.
+
+Preferred contract:
+
+save(
+    *,
+    source_id: UUID,
+    external_id: str,
+    raw_data: dict[str, Any],
+) -> RawListing
+
+However:
+
+The abstract repository layer should preferably not depend on the concrete
+SQLAlchemy ORM model if the current architecture already separates such
+contracts.
+
+Therefore inspect the existing repository architecture first.
+
+Use the smallest change consistent with the current project style.
+
+If RawListingRepository already imports/uses RawListing as its persistence
+return type elsewhere, standardize both methods to return RawListing.
+
+If keeping the repository abstraction framework-independent is clearly the
+existing architectural intent, define a small appropriate return contract
+instead.
+
+DO NOT invent a large repository DTO architecture.
+
+The key requirement is:
+
+abstract signature == implementation signature
+
+and:
+
+abstract return contract == implementation return contract.
+
+
+==================================================
+6. DO NOT CHANGE RAW JOURNAL SEMANTICS
+==================================================
+
+The database currently has:
+
+UNIQUE(source_id, external_id)
+
+Do NOT change this constraint.
+
+Do NOT modify Alembic.
+
+Do NOT implement repeated snapshot history.
+
+Do NOT implement upsert.
+
+Do NOT implement skip-existing behavior unless it is ALREADY part of the
+current repository behavior.
+
+The repeated-collection/idempotency policy will be a separate decision.
+
+This task is contract hardening only.
+
+
+==================================================
+7. UPDATE TESTS
+==================================================
+
+Update existing ingestion/repository unit tests as necessary.
+
+Prefer database-free tests for IngestionService.
+
+
+Required ingestion tests:
+
+
+TEST 1 — source_id is application supplied
+
+Create a source_id using:
+
+uuid4()
+
+Instantiate:
+
+IngestionService(
+    collector=...,
+    repository=...,
+    source_id=source_id,
+)
+
+Verify repository receives exactly that source_id.
+
+
+TEST 2 — raw payload does not need source_id
+
+Use the actual MockAdapter / MockCollector payload.
+
+Verify ingestion succeeds even though the external raw dictionary contains no
+database source UUID.
+
+
+TEST 3 — source_id is not injected into raw_data
+
+Capture the repository call.
+
+Verify:
+
+"source_id" not in raw_data
+
+unless the external source itself originally emitted such a field.
+
+For the MockAdapter fixture it must not be present.
+
+
+TEST 4 — external_id mapping
+
+Verify repository receives:
+
+external_id == "mock-001"
+
+from the MockAdapter payload.
+
+
+TEST 5 — raw payload preserved
+
+Verify the raw_data passed to the repository matches the external collected
+payload.
+
+IngestionService must not mutate it.
+
+
+TEST 6 — invalid external_id
+
+Verify missing, empty, and whitespace-only external_id raise ValueError
+containing:
+
+external_id
+
+
+TEST 7 — repository return contract
+
+If repository.save() returns a persisted value, verify IngestionService's
+behavior with that value according to the existing service contract.
+
+Do not add unnecessary behavior only for this test.
+
+
+==================================================
+8. SQLALCHEMY REPOSITORY
+==================================================
+
+Update SQLAlchemyRawListingRepository only as required to make it conform to
+the abstract repository contract.
+
+Preserve:
+
+- injected Session;
+- construction of RawListing;
+- session.add(...);
+- session.flush(...);
+
+Do NOT:
+
+- commit inside repository;
+- create sessions internally;
+- change transaction ownership;
+- add upsert logic;
+- catch IntegrityError unless already part of current design.
+
+
+==================================================
+9. NORMALIZATION MUST NOT CHANGE
+==================================================
+
+Do NOT modify:
+
+backend/app/normalization/base.py
+backend/app/normalization/types.py
+backend/app/normalization/mock.py
+backend/app/normalization/service.py
+
+Task #5.4 boundary is complete.
+
+
+==================================================
+10. ARCHITECTURAL GUARDRAILS
+==================================================
+
+Do NOT modify:
+
+- database models unless strictly necessary for type imports only;
+- Alembic migrations;
+- database constraints;
+- SourceAdapter contract;
+- Collector contract;
+- MockAdapter source payload;
+- MockNormalizer;
+- NormalizedListing;
+- Building logic;
+- Property logic;
+- Listing persistence;
+- deduplication;
+- geocoding;
+- comparable engine;
+- valuation engine;
+- Docker;
+- requirements.
+
+Do not introduce new dependencies.
+
+Do not commit.
+
+
+==================================================
+11. VALIDATION
+==================================================
+
+Run the relevant ingestion/repository tests.
+
+Also run the normalization/source regression suite:
+
+pytest \
+    tests/test_source_adapter.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    <current ingestion tests> \
+    <current repository tests if database-free> \
+    -q
+
+If a repository test requires PostgreSQL, report that fact rather than
+inventing an in-memory substitute for PostgreSQL-specific behavior.
+
+Then run:
+
+git diff --check
+
+
+Return:
+
+1. contracts discovered before modification;
+
+2. exact architectural decision made for:
+   - source_id ownership;
+   - RawListingRepository.save() return contract;
+
+3. files modified;
+
+4. complete new contents of:
+   backend/app/ingestion/service.py
+
+5. complete relevant repository interface and implementation methods;
+
+6. tests added/modified;
+
+7. pytest result;
+
+8. git diff --check result;
+
+9. git status --short.
+
+Do not commit.
+
+Stop after reporting.
