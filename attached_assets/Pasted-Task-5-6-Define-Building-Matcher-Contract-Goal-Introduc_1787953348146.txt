@@ -1,0 +1,516 @@
+Task #5.6 — Define Building Matcher Contract
+
+Goal:
+Introduce a framework-independent contract for resolving whether a
+NormalizedListing belongs to an already known building.
+
+This task defines the matching CONTRACT only.
+
+Do NOT implement database lookup yet.
+Do NOT implement SQLAlchemy matching yet.
+Do NOT implement fuzzy address matching yet.
+
+
+CURRENT PIPELINE
+
+External Source
+    ↓
+SourceAdapter
+    ↓
+Collector
+    ↓
+IngestionService
+    ↓
+raw_listings
+    ↓
+NormalizationService
+    ↓
+Normalizer
+    ↓
+NormalizedListing
+    ↓
+BuildingMatcher
+    ↓
+BuildingMatchResult
+    ↓
+future Building persistence / Property matching
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/normalization/types.py
+backend/app/normalization/base.py
+backend/app/models/building.py
+backend/app/models/property.py
+backend/app/models/listing.py
+
+Also inspect the current repository/package structure under:
+
+backend/app/
+
+and relevant tests.
+
+Report briefly:
+
+1. the current NormalizedListing fields;
+2. the current Building model fields;
+3. which NormalizedListing fields could potentially be used to identify a
+   building;
+4. whether any existing building matcher/repository abstraction already
+   exists.
+
+Do not modify anything during this inspection step.
+
+
+==================================================
+2. CREATE MATCHING PACKAGE
+==================================================
+
+Create:
+
+backend/app/matching/__init__.py
+backend/app/matching/building.py
+
+Keep the package framework-independent.
+
+Do NOT import:
+
+- SQLAlchemy;
+- ORM models;
+- repositories;
+- database sessions.
+
+
+==================================================
+3. BUILDING MATCH RESULT
+==================================================
+
+In:
+
+backend/app/matching/building.py
+
+define:
+
+BuildingMatchResult
+
+Use:
+
+@dataclass(frozen=True, slots=True)
+
+from Python standard library dataclasses.
+
+
+The result must contain:
+
+matched: bool
+
+candidate_key: str | None
+
+confidence: float
+
+reason: str
+
+
+Semantics:
+
+matched
+    Whether the matcher considers an existing building candidate to be a
+    sufficiently strong match.
+
+candidate_key
+    Framework-independent identifier of the matched candidate supplied by a
+    future candidate provider.
+
+    It is NOT necessarily a database UUID.
+
+    Examples in future implementations might include:
+    - a stringified UUID;
+    - an external candidate key;
+    - another application-level identifier.
+
+    For an unmatched result it must be None.
+
+confidence
+    Deterministic matching confidence in the inclusive range 0.0–1.0.
+
+    This is a matcher score, NOT a statistical probability.
+
+reason
+    Short machine-readable diagnostic reason.
+
+    Example future values:
+    - "exact_address"
+    - "coordinates"
+    - "address_and_coordinates"
+    - "no_candidates"
+
+Do NOT create an enum yet.
+Keep reason as str for this MVP contract.
+
+
+==================================================
+4. RESULT INVARIANTS
+==================================================
+
+BuildingMatchResult must validate its own structural invariants in
+__post_init__.
+
+Required invariants:
+
+1. confidence must be between 0.0 and 1.0 inclusive;
+
+2. if matched is True:
+   candidate_key must be a non-empty string;
+
+3. if matched is False:
+   candidate_key must be None;
+
+4. reason must be a non-empty string.
+
+Raise ValueError with concise messages when an invariant is violated.
+
+Do NOT implement any actual building matching logic in __post_init__.
+
+
+==================================================
+5. BUILDING MATCHER ABSTRACT INTERFACE
+==================================================
+
+In the same module define:
+
+class BuildingMatcher(ABC)
+
+with exactly one abstract operation:
+
+match(listing: NormalizedListing) -> BuildingMatchResult
+
+
+Requirements:
+
+- inherit from ABC;
+- use @abstractmethod;
+- accept NormalizedListing;
+- return BuildingMatchResult;
+- contain no implementation logic;
+- contain no database access;
+- contain no ORM dependencies.
+
+
+Architectural meaning:
+
+NormalizedListing
+        ↓
+BuildingMatcher
+        ↓
+BuildingMatchResult
+
+
+==================================================
+6. IMPORTANT RESPONSIBILITY BOUNDARY
+==================================================
+
+Document clearly:
+
+BuildingMatcher IS responsible for deciding whether a normalized listing
+matches a known building candidate according to a matching strategy.
+
+Future strategies may use:
+
+- normalized address;
+- city;
+- latitude;
+- longitude;
+- building type;
+- other deterministic building-level attributes.
+
+
+BuildingMatcher IS NOT responsible for:
+
+- collecting listings;
+- normalization;
+- geocoding;
+- creating Building records;
+- updating Building records;
+- database transaction management;
+- Property matching;
+- Listing persistence;
+- duplicate listing detection;
+- comparable selection;
+- valuation.
+
+
+==================================================
+7. DO NOT DEFINE THE DATABASE CANDIDATE SOURCE YET
+==================================================
+
+Very important:
+
+Do NOT create:
+
+- BuildingRepository;
+- SQLAlchemyBuildingMatcher;
+- database queries;
+- candidate loading logic.
+
+We first want a stable matcher result contract.
+
+Candidate retrieval will be designed separately.
+
+
+==================================================
+8. PUBLIC EXPORTS
+==================================================
+
+Update:
+
+backend/app/matching/__init__.py
+
+Export:
+
+BuildingMatcher
+BuildingMatchResult
+
+Use __all__.
+
+No side effects.
+
+
+==================================================
+9. TESTS
+==================================================
+
+Create:
+
+backend/tests/test_building_matcher_contract.py
+
+
+Create a tiny concrete matcher for testing, for example:
+
+class ExactTestMatcher(BuildingMatcher):
+
+    def match(
+        self,
+        listing: NormalizedListing,
+    ) -> BuildingMatchResult:
+
+        return BuildingMatchResult(
+            matched=True,
+            candidate_key="building-test-001",
+            confidence=1.0,
+            reason="exact_address",
+        )
+
+
+Use a valid NormalizedListing fixture.
+
+
+Required tests:
+
+
+TEST 1 — BuildingMatcher is abstract
+
+Verify BuildingMatcher itself cannot be instantiated.
+
+
+TEST 2 — concrete matcher works
+
+Verify a concrete subclass can be instantiated and returns
+BuildingMatchResult.
+
+
+TEST 3 — valid matched result
+
+Verify:
+
+matched=True
+candidate_key="building-test-001"
+confidence=1.0
+reason="exact_address"
+
+is valid.
+
+
+TEST 4 — valid unmatched result
+
+Verify:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="no_candidates"
+
+is valid.
+
+
+TEST 5 — confidence lower bound
+
+confidence < 0.0 must raise ValueError containing "confidence".
+
+
+TEST 6 — confidence upper bound
+
+confidence > 1.0 must raise ValueError containing "confidence".
+
+
+TEST 7 — matched requires candidate key
+
+matched=True with:
+
+candidate_key=None
+
+must raise ValueError containing "candidate_key".
+
+
+TEST 8 — matched rejects empty candidate key
+
+Test:
+
+candidate_key=""
+candidate_key="   "
+
+when matched=True.
+
+Must raise ValueError containing "candidate_key".
+
+
+TEST 9 — unmatched forbids candidate key
+
+matched=False with a non-None candidate_key must raise ValueError containing
+"candidate_key".
+
+
+TEST 10 — reason required
+
+Empty and whitespace-only reason must raise ValueError containing "reason".
+
+
+TEST 11 — result is immutable
+
+Verify the frozen dataclass cannot be modified after construction.
+
+Use the standard dataclasses/FrozenInstanceError behavior.
+Do not implement custom immutability.
+
+
+==================================================
+10. ARCHITECTURAL GUARDRAILS
+==================================================
+
+Do NOT:
+
+- import SQLAlchemy;
+- import ORM Building;
+- import ORM Property;
+- import ORM Listing;
+- access PostgreSQL;
+- create repositories;
+- create SQLAlchemyBuildingMatcher;
+- perform address normalization;
+- perform fuzzy matching;
+- perform geocoding;
+- calculate geographic distance;
+- create or update buildings;
+- create or update properties;
+- persist listings;
+- deduplicate listings;
+- modify NormalizedListing;
+- modify Normalizer;
+- modify NormalizationService;
+- modify ingestion;
+- modify collectors;
+- modify source adapters;
+- modify database models;
+- modify Alembic;
+- modify migrations;
+- add dependencies.
+
+Do not commit.
+
+
+==================================================
+11. FILE SCOPE
+==================================================
+
+Create only:
+
+backend/app/matching/__init__.py
+backend/app/matching/building.py
+backend/tests/test_building_matcher_contract.py
+
+Do not modify existing project files unless absolutely required for imports.
+
+If an unexpected existing project structure makes this impossible, STOP and
+report the conflict rather than expanding scope.
+
+
+==================================================
+12. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_building_matcher_contract.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+using the project's existing uv environment.
+
+Then run:
+
+git diff --check
+
+
+Also perform a lightweight import guardrail check confirming that:
+
+backend/app/matching/building.py
+
+does NOT import:
+
+- sqlalchemy;
+- app.models;
+- app.repositories.
+
+
+==================================================
+13. REPORT
+==================================================
+
+Return:
+
+1. NormalizedListing and Building fields discovered during inspection;
+
+2. fields potentially useful for future building matching;
+
+3. confirmation whether any previous matcher/repository abstraction existed;
+
+4. files created/modified;
+
+5. complete contents of:
+   backend/app/matching/building.py
+
+6. complete contents of:
+   backend/app/matching/__init__.py
+
+7. complete contents of:
+   backend/tests/test_building_matcher_contract.py
+
+8. pytest result;
+
+9. git diff --check result;
+
+10. import guardrail result;
+
+11. git status --short.
+
+Do not commit.
+
+Stop after reporting.
