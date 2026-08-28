@@ -1,0 +1,227 @@
+Task #5.1 — Create Normalizer Interface
+
+Goal:
+Introduce the normalization layer contract for the real-estate data pipeline.
+
+Current architecture:
+
+External Source
+    ↓
+SourceAdapter
+    ↓
+Collector
+    ↓
+IngestionService
+    ↓
+RawListingRepository
+    ↓
+raw_listings
+    ↓
+Normalizer
+    ↓
+Building / Property / Listing
+
+This task must create ONLY the normalization interface.
+
+Do not implement normalization logic yet.
+
+
+CREATE ONLY:
+
+backend/app/normalization/__init__.py
+backend/app/normalization/base.py
+backend/tests/test_normalizer_interface.py
+
+
+==================================================
+1. NORMALIZATION PACKAGE
+==================================================
+
+Create:
+
+backend/app/normalization/__init__.py
+
+Keep it minimal.
+
+Do not add side effects.
+
+
+==================================================
+2. NORMALIZER ABSTRACT INTERFACE
+==================================================
+
+Create:
+
+backend/app/normalization/base.py
+
+Implement an abstract base class named:
+
+Normalizer
+
+Use Python standard library only:
+
+- abc.ABC
+- abc.abstractmethod
+- typing.Any
+
+The interface must expose exactly one normalization operation:
+
+normalize(raw_listing: dict[str, Any]) -> dict[str, Any]
+
+Requirements:
+
+- Normalizer must inherit from ABC.
+- normalize() must be decorated with @abstractmethod.
+- normalize() must accept one raw listing dictionary.
+- normalize() must return a normalized dictionary.
+- The base class must contain no normalization implementation.
+- Do not mutate the input in the abstract interface.
+- Do not import SQLAlchemy.
+- Do not import ORM models.
+- Do not access the database.
+- Do not perform persistence.
+- Do not perform Building matching.
+- Do not perform Property matching.
+- Do not perform Listing matching.
+- Do not perform deduplication.
+- Do not perform geocoding.
+- Do not perform source-specific parsing.
+
+Add concise docstrings describing the architectural responsibility.
+
+The Normalizer boundary is:
+
+raw source-neutral dictionary
+        ↓
+Normalizer
+        ↓
+normalized source-neutral dictionary
+
+The normalized result is NOT an ORM object.
+
+
+==================================================
+3. ARCHITECTURAL RESPONSIBILITY
+==================================================
+
+Document clearly in the class/module docstring:
+
+Normalizer IS responsible for transforming source-specific/raw field representations into a canonical application-level data representation.
+
+Examples of future normalization responsibilities may include:
+
+- canonical field names;
+- type conversion;
+- area normalization;
+- room/studio representation;
+- price normalization;
+- floor normalization;
+- address field cleanup.
+
+These are examples only.
+
+DO NOT implement any of them in Task #5.1.
+
+
+Normalizer IS NOT responsible for:
+
+- database access;
+- ORM object creation;
+- persistence;
+- source collection;
+- API requests;
+- geocoding;
+- Building identity matching;
+- Property identity matching;
+- listing deduplication;
+- comparable selection;
+- valuation.
+
+
+==================================================
+4. TEST
+==================================================
+
+Create:
+
+backend/tests/test_normalizer_interface.py
+
+The test must verify only the interface contract.
+
+Create a tiny test implementation such as:
+
+class TestNormalizer(Normalizer):
+    def normalize(self, raw_listing):
+        return dict(raw_listing)
+
+Verify:
+
+1. Normalizer itself cannot be instantiated because it is abstract.
+
+2. A concrete subclass implementing normalize() can be instantiated.
+
+3. normalize() accepts a dictionary.
+
+4. normalize() returns a dictionary.
+
+Do not use:
+
+- PostgreSQL;
+- SQLAlchemy;
+- application ORM models;
+- external APIs;
+- mocks requiring third-party libraries.
+
+
+==================================================
+5. SCOPE GUARDRAILS
+==================================================
+
+DO NOT modify:
+
+- Alembic migrations;
+- database models;
+- repositories;
+- collectors;
+- source adapters;
+- ingestion service;
+- docker-compose.yml;
+- alembic.ini;
+- requirements files;
+- documentation.
+
+Do not create a MockNormalizer yet.
+That will be Task #5.2.
+
+Do not introduce Pydantic DTOs yet.
+We will decide the normalized data schema separately before implementing concrete normalization.
+
+Do not commit.
+
+
+==================================================
+6. VALIDATION
+==================================================
+
+Run from the backend project context:
+
+pytest tests/test_normalizer_interface.py -q
+
+or use the project's existing uv execution pattern if required.
+
+Also run:
+
+git diff --check
+
+Then show:
+
+1. files created;
+2. complete contents of backend/app/normalization/base.py;
+3. complete contents of backend/tests/test_normalizer_interface.py;
+4. test result;
+5. git diff --check result;
+6. git status --short.
+
+Do not modify anything outside the stated files.
+
+Stop after reporting the result.
