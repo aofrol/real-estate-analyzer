@@ -1,0 +1,770 @@
+Task #5.10 — Building Persistence Service
+
+Goal:
+Introduce the first controlled persistence step that turns a
+BuildingResolutionResult into an actual persisted Building reference.
+
+This task must support:
+
+1. reusing an already matched Building;
+2. creating a new Building when resolution status is "create_required";
+3. refusing to create anything when resolution status is "ambiguous".
+
+Do NOT implement Property persistence yet.
+Do NOT implement Listing persistence yet.
+Do NOT modify matching logic.
+
+
+CURRENT FLOW
+
+NormalizedListing
+        ↓
+BuildingResolutionService
+        ↓
+BuildingResolutionResult
+        ↓
+BuildingPersistenceService
+        ↓
+existing Building OR newly created Building
+        ↓
+BuildingPersistenceResult
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/resolution/building.py
+backend/app/resolution/__init__.py
+
+backend/app/models/building.py
+backend/app/models/base.py
+
+backend/app/database.py
+
+backend/app/repositories/raw_listing.py
+backend/app/repositories/sqlalchemy_raw_listing.py
+
+backend/app/matching/address.py
+backend/app/normalization/types.py
+
+existing tests involving ORM object construction and fake Session usage.
+
+Report before modifying:
+
+1. exact Building constructor-relevant fields;
+2. required/non-null Building fields;
+3. whether Building.id has Python-side and/or server-side UUID defaults;
+4. current Session injection convention;
+5. whether there is any existing Building repository/service;
+6. whether address_normalized currently has any application-level creation rule.
+
+Do not modify anything before inspection.
+
+
+==================================================
+2. RESULT TYPE
+==================================================
+
+Create:
+
+backend/app/persistence/__init__.py
+backend/app/persistence/building.py
+
+
+Define:
+
+@dataclass(frozen=True, slots=True)
+class BuildingPersistenceResult
+
+
+Fields:
+
+building_key: str
+created: bool
+
+
+Semantics:
+
+building_key
+    String representation of the persisted Building identity.
+
+created
+    False if an existing matched Building was reused.
+    True if a new Building row was created.
+
+
+==================================================
+3. RESULT INVARIANTS
+==================================================
+
+Validate in __post_init__:
+
+- building_key must be a non-empty string;
+- created must be bool.
+
+Raise ValueError containing the relevant field name.
+
+Do not include ORM objects in this result.
+
+
+==================================================
+4. BUILDING PERSISTENCE SERVICE
+==================================================
+
+In:
+
+backend/app/persistence/building.py
+
+define:
+
+class BuildingPersistenceService
+
+
+Constructor:
+
+def __init__(
+    self,
+    session: Session,
+) -> None:
+    self._session = session
+
+
+Method:
+
+def persist(
+    self,
+    *,
+    listing: NormalizedListing,
+    resolution: BuildingResolutionResult,
+) -> BuildingPersistenceResult:
+    ...
+
+
+Use the project's SQLAlchemy Session style.
+
+
+==================================================
+5. STATUS: MATCHED
+==================================================
+
+If:
+
+resolution.status == "matched"
+
+the service must NOT create a new Building.
+
+It must:
+
+1. validate/parse resolution.building_key as the Building primary-key type
+   expected by the model;
+
+2. load the existing Building using the injected Session;
+
+3. if found:
+   return:
+
+   BuildingPersistenceResult(
+       building_key=str(building.id),
+       created=False,
+   )
+
+4. if not found:
+   raise ValueError containing:
+
+   building_key
+
+
+This protects against stale or invalid matcher candidate keys.
+
+
+==================================================
+6. LOADING EXISTING BUILDING
+==================================================
+
+Use the simplest SQLAlchemy 2.x lookup appropriate for a primary key.
+
+Preferred if consistent with project style:
+
+self._session.get(Building, parsed_uuid)
+
+Do NOT:
+
+- update the existing Building;
+- merge listing data into it;
+- refresh building fields;
+- perform candidate lookup again;
+- call the matcher again.
+
+
+==================================================
+7. STATUS: CREATE_REQUIRED
+==================================================
+
+If:
+
+resolution.status == "create_required"
+
+create exactly one Building ORM object from the NormalizedListing.
+
+
+Map fields:
+
+
+address_raw
+    listing["address"]
+
+
+address_normalized
+    canonicalize_address(listing["address"])
+
+
+city
+    listing["city"]
+
+
+floors_total
+    listing["total_floors"]
+
+
+building_type
+    listing["building_type"]
+
+
+location
+    See LOCATION RULE below.
+
+
+Do not populate fields that cannot be safely derived:
+
+district
+street
+house_number
+postal_code
+year_built
+
+Leave them None/default.
+
+
+==================================================
+8. LOCATION RULE
+==================================================
+
+Inspect the actual Building.location configuration.
+
+If:
+
+listing["latitude"] is not None
+AND
+listing["longitude"] is not None
+
+do NOT invent unsafe GeoAlchemy/PostGIS serialization.
+
+Only populate location if the project already contains a simple, established,
+tested pattern for assigning a geography POINT to Building.location.
+
+If no such established pattern exists:
+
+set:
+
+location=None
+
+for Task #5.10.
+
+
+Document this decision.
+
+Do NOT:
+
+- create WKTElement unless already an established project convention;
+- manually serialize WKB;
+- issue PostGIS SQL;
+- add new dependencies.
+
+Geographic persistence can be added in a later dedicated task.
+
+
+==================================================
+9. CREATE + FLUSH
+==================================================
+
+For create_required:
+
+1. instantiate Building;
+2. session.add(building);
+3. session.flush();
+
+Do NOT commit.
+
+Transaction ownership remains outside this service.
+
+After flush, Building.id must be available.
+
+Return:
+
+BuildingPersistenceResult(
+    building_key=str(building.id),
+    created=True,
+)
+
+
+==================================================
+10. STATUS: AMBIGUOUS
+==================================================
+
+If:
+
+resolution.status == "ambiguous"
+
+the service must:
+
+- NOT query for creation;
+- NOT create Building;
+- NOT add;
+- NOT flush;
+- NOT commit.
+
+Raise ValueError containing:
+
+ambiguous
+
+
+This is a hard safety boundary against duplicate building creation.
+
+
+==================================================
+11. UNKNOWN STATUS
+==================================================
+
+BuildingResolutionResult already validates allowed statuses.
+
+Do not duplicate large status validation logic.
+
+A defensive final branch may raise ValueError if somehow reached.
+
+
+==================================================
+12. ADDRESS VALIDATION
+==================================================
+
+For create_required:
+
+use:
+
+canonicalize_address(listing["address"])
+
+This already validates empty/non-string addresses.
+
+Do not duplicate address parsing logic.
+
+
+==================================================
+13. BUILDING KEY PARSING
+==================================================
+
+Building currently uses UUID primary keys.
+
+If inspection confirms that:
+
+for matched status parse:
+
+resolution.building_key
+
+using Python UUID.
+
+If parsing fails:
+
+raise ValueError containing:
+
+building_key
+
+
+Do NOT silently pass arbitrary strings into Session.get.
+
+
+==================================================
+14. DO NOT CREATE A BUILDING REPOSITORY YET
+==================================================
+
+For this small MVP step, use the injected SQLAlchemy Session directly inside
+BuildingPersistenceService.
+
+Do NOT introduce:
+
+BuildingRepository
+SQLAlchemyBuildingRepository
+
+unless an existing abstraction already clearly requires it.
+
+We do not want unnecessary abstraction layers before the persistence behavior
+is proven.
+
+
+==================================================
+15. IMPORTANT TRANSACTION RULE
+==================================================
+
+BuildingPersistenceService:
+
+MAY:
+- session.get(...)
+- session.add(...)
+- session.flush()
+
+MUST NOT:
+- session.commit()
+- session.rollback()
+- create sessions
+- close sessions
+
+Transaction ownership is external.
+
+
+==================================================
+16. TESTS
+==================================================
+
+Create:
+
+backend/tests/test_building_persistence_service.py
+
+
+Prefer database-free unit tests with a fake Session.
+
+You may instantiate real Building ORM objects.
+
+Do NOT require PostgreSQL for the primary test suite.
+
+
+Required tests:
+
+
+TEST 1 — matched existing building
+
+Given:
+
+resolution.status == "matched"
+building_key == known UUID
+
+Fake Session.get returns Building with that UUID.
+
+Expected:
+
+created is False
+building_key is preserved
+
+Verify:
+
+no add
+no flush
+no commit
+
+
+TEST 2 — matched building key is parsed as UUID
+
+Verify Session.get receives:
+
+Building
+UUID(...)
+
+not a raw string.
+
+
+TEST 3 — malformed matched building_key
+
+Example:
+
+"not-a-uuid"
+
+Expected:
+
+ValueError containing "building_key"
+
+No add/flush.
+
+
+TEST 4 — matched building missing from persistence
+
+Session.get returns None.
+
+Expected:
+
+ValueError containing "building_key"
+
+No creation.
+
+
+TEST 5 — create_required creates Building
+
+Use a valid NormalizedListing.
+
+Verify created Building contains:
+
+address_raw
+address_normalized
+city
+floors_total
+building_type
+
+with the expected values.
+
+
+TEST 6 — creation canonicalizes address
+
+Listing:
+
+"  Москва,   Улица Ленина, 1  "
+
+Expected Building.address_normalized:
+
+"москва, улица ленина, 1"
+
+
+TEST 7 — creation leaves unsupported fields unset
+
+Verify no invented values for:
+
+district
+street
+house_number
+postal_code
+year_built
+
+
+TEST 8 — create_required adds and flushes once
+
+Verify:
+
+session.add called once
+session.flush called once
+
+session.commit never called.
+
+
+TEST 9 — created result
+
+After fake flush assigns a known UUID to Building.id:
+
+Expected:
+
+BuildingPersistenceResult(
+    building_key=<uuid string>,
+    created=True,
+)
+
+
+TEST 10 — ambiguous refuses persistence
+
+Resolution:
+
+status="ambiguous"
+
+Expected:
+
+ValueError containing "ambiguous"
+
+Verify:
+
+no get
+no add
+no flush
+no commit
+
+
+TEST 11 — result immutable
+
+BuildingPersistenceResult is frozen.
+
+
+TEST 12 — invalid result building key
+
+Empty/whitespace building_key raises ValueError.
+
+
+TEST 13 — created must be bool
+
+Invalid non-bool value raises ValueError containing "created".
+
+
+TEST 14 — no transaction ownership
+
+Across both matched and create paths verify:
+
+commit == 0
+rollback == 0
+
+
+==================================================
+17. OPTIONAL SERVICE INTEGRATION TEST
+==================================================
+
+Add one database-free flow:
+
+NormalizedListing
+    ↓
+Fake matcher
+    ↓
+BuildingResolutionService
+    ↓
+BuildingPersistenceService
+    ↓
+new Building
+
+For a no_candidates matcher result:
+
+expected persistence result:
+
+created=True
+
+
+Do not add SQLAlchemy candidate-provider integration here unless simple.
+
+
+==================================================
+18. LOCATION TEST
+==================================================
+
+If no established safe geography assignment pattern exists:
+
+verify a listing containing:
+
+latitude=55.75
+longitude=37.62
+
+still creates Building with:
+
+location is None
+
+
+This explicitly documents Task #5.10 behavior.
+
+
+==================================================
+19. ARCHITECTURAL GUARDRAILS
+==================================================
+
+BuildingPersistenceService may import:
+
+- sqlalchemy.orm.Session
+- app.models.building.Building
+- app.normalization.types.NormalizedListing
+- app.resolution.BuildingResolutionResult
+- app.matching.address.canonicalize_address
+
+
+Do NOT modify:
+
+- Building model;
+- Property model;
+- Listing model;
+- RawListing model;
+- NormalizedListing;
+- normalization;
+- matching;
+- resolution;
+- ingestion;
+- adapters;
+- collectors;
+- Alembic;
+- migrations;
+- database constraints;
+- Docker;
+- dependencies.
+
+Do NOT implement:
+
+- Property persistence;
+- Listing persistence;
+- duplicate detection;
+- geocoding;
+- PostGIS matching;
+- fuzzy matching;
+- Building updates;
+- upsert;
+- commit management.
+
+Do not commit.
+
+
+==================================================
+20. FILE SCOPE
+==================================================
+
+Create only:
+
+backend/app/persistence/__init__.py
+backend/app/persistence/building.py
+backend/tests/test_building_persistence_service.py
+
+
+Do not modify existing files.
+
+If actual model/session structure makes that impossible:
+
+STOP and report the conflict rather than expanding scope.
+
+
+==================================================
+21. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_building_persistence_service.py \
+    tests/test_building_resolution_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then:
+
+git diff --check
+
+
+Perform a transaction guardrail check confirming:
+
+BuildingPersistenceService does not call:
+
+commit(
+rollback(
+
+and does not create a Session internally.
+
+
+==================================================
+22. REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+2. exact persistence behavior for:
+   - matched;
+   - create_required;
+   - ambiguous;
+3. coordinate/location decision;
+4. files created;
+5. complete contents of:
+   backend/app/persistence/building.py
+6. complete contents of:
+   backend/app/persistence/__init__.py
+7. complete contents of:
+   backend/tests/test_building_persistence_service.py
+8. pytest result;
+9. git diff --check result;
+10. transaction guardrail result;
+11. git status --short.
+
+Do not commit.
+
+Stop after reporting.
