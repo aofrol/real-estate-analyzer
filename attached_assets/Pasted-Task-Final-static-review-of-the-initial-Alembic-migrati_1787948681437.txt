@@ -1,0 +1,197 @@
+Task: Final static review of the initial Alembic migration before first test application.
+
+Current repository state:
+- branch: main
+- HEAD: db2f09a99ef5a0dc083e0b0b0371028a2835b9f5
+- working tree is expected to be clean
+- initial Alembic revision: a153db291edf
+
+IMPORTANT:
+This is a READ-ONLY REVIEW.
+
+DO NOT:
+- modify any files;
+- create a new revision;
+- modify SQLAlchemy models;
+- run alembic upgrade head;
+- run downgrade;
+- execute DDL against the database;
+- commit anything.
+
+Review the existing initial migration corresponding to revision:
+
+a153db291edf
+
+Perform a complete static consistency audit against the current SQLAlchemy models and approved database design.
+
+Check the following.
+
+1. MIGRATION STRUCTURE
+
+Verify:
+- revision = a153db291edf;
+- down_revision = None;
+- upgrade() exists;
+- downgrade() exists;
+- migration is syntactically valid Python.
+
+2. EXTENSIONS
+
+Verify upgrade() creates BEFORE any application table:
+
+CREATE EXTENSION IF NOT EXISTS postgis
+CREATE EXTENSION IF NOT EXISTS pgcrypto
+
+Verify downgrade() DOES NOT automatically drop either extension.
+
+3. TABLES
+
+Verify exactly these 9 application tables are created:
+
+- sources
+- buildings
+- raw_listings
+- properties
+- listings
+- listing_price_history
+- search_requests
+- valuation_results
+- valuation_comparables
+
+Also distinguish PostGIS system tables from application tables.
+
+4. UUID PRIMARY KEYS
+
+Verify all application tables:
+- use UUID primary keys;
+- use server-side gen_random_uuid() where defined by the current models.
+
+5. MONEY
+
+Verify all monetary fields use BIGINT kopecks.
+
+Especially inspect:
+- listings.asking_price
+- listings.asking_price_per_sqm
+- listing_price_history.asking_price
+- valuation result monetary metrics
+- valuation comparable price snapshots
+
+No FLOAT/DOUBLE/NUMERIC must be used for monetary values unless explicitly justified by the current design.
+
+6. POSTGIS
+
+Verify:
+- spatial fields use geography(Point,4326), not geometry(Point,4326);
+- automatic GeoAlchemy spatial indexes are not duplicated;
+- buildings has the intended explicit GiST index;
+- listings has the intended explicit partial GiST index;
+- spatial queries are therefore compatible with distances in meters.
+
+7. LISTING DEDUPLICATION
+
+Verify:
+- listings.duplicate_of_id is nullable;
+- it references listings.id;
+- ON DELETE behavior matches the current model;
+- duplicates are not physically deleted by schema design.
+
+8. UNIQUE CONSTRAINTS
+
+Verify:
+- sources.name uses the named constraint uq_sources_name;
+- raw_listings has the intended source_id + external_id uniqueness;
+- listings has the intended source_id + external_id uniqueness.
+
+9. TEMPORAL INDEXES
+
+Verify indexes intended for recent-first access use DESC where required:
+
+- listing_price_history.recorded_at
+- search_requests.created_at
+- valuation_results.computed_at
+
+10. VALUATION REPRODUCIBILITY
+
+Verify valuation_results includes:
+- algorithm_version NOT NULL;
+- parameters JSONB NOT NULL.
+
+Verify valuation_comparables contains an immutable calculation snapshot including at minimum:
+- asking price;
+- price per sqm;
+- area;
+- rooms;
+- floor;
+- source;
+- distance;
+- similarity score;
+- rank;
+- weight.
+
+11. FOREIGN KEYS
+
+Check all FK targets and dependency ordering.
+
+Confirm that table creation order in upgrade() cannot violate FK dependencies.
+
+Confirm downgrade() drops dependent objects in safe reverse order.
+
+12. ALEMBIC / MODEL CONSISTENCY
+
+Compare the migration against current Base.metadata.
+
+Identify any meaningful divergence between:
+- migration;
+- SQLAlchemy models;
+- docs/database-design-v0.1.md.
+
+Do NOT flag explicitly deferred features as blockers unless the current migration contradicts the approved model.
+
+13. POTENTIAL FIRST-UPGRADE FAILURES
+
+Look specifically for issues likely to fail on:
+
+alembic upgrade head
+
+including:
+- missing extensions;
+- unsupported defaults;
+- invalid PostGIS types;
+- duplicate indexes;
+- partial index syntax;
+- foreign-key ordering;
+- PostgreSQL identifier issues;
+- invalid server defaults.
+
+RETURN ONLY A REVIEW REPORT.
+
+Use this format:
+
+## Static Migration Review
+
+### PASS
+...
+
+### WARNINGS
+...
+
+### BLOCKERS
+...
+
+### Tables
+9/9 or list discrepancy
+
+### Indexes
+summary
+
+### Model/Migration Drift
+none / details
+
+### Final verdict
+GO / NO-GO for first test execution of:
+
+alembic upgrade head
+
+Do not modify anything.
+Stop after the report.
