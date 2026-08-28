@@ -1,0 +1,638 @@
+Task #5.7 — Building Candidate Contract and Exact Building Matcher
+
+Goal:
+Implement the first deterministic building-matching strategy without database
+or ORM dependencies.
+
+This task introduces:
+
+1. a framework-independent BuildingCandidate representation;
+2. a BuildingCandidateProvider interface;
+3. an ExactBuildingMatcher implementation.
+
+Do NOT implement SQLAlchemy candidate retrieval yet.
+
+
+CURRENT FLOW
+
+NormalizedListing
+    ↓
+BuildingCandidateProvider
+    ↓
+BuildingCandidate[]
+    ↓
+ExactBuildingMatcher
+    ↓
+BuildingMatchResult
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/matching/building.py
+backend/app/matching/__init__.py
+backend/app/normalization/types.py
+backend/app/models/building.py
+backend/tests/test_building_matcher_contract.py
+
+Also inspect project naming/style conventions.
+
+Report briefly:
+
+1. current BuildingMatcher contract;
+2. current BuildingMatchResult fields;
+3. current Building ORM fields relevant to candidate representation;
+4. whether any candidate-provider abstraction already exists.
+
+Do not modify anything during inspection.
+
+
+==================================================
+2. BUILDING CANDIDATE TYPE
+==================================================
+
+Create:
+
+backend/app/matching/candidates.py
+
+Define:
+
+@dataclass(frozen=True, slots=True)
+class BuildingCandidate
+
+Fields:
+
+key: str
+
+address_normalized: str
+
+city: str | None
+
+latitude: float | None
+
+longitude: float | None
+
+building_type: str | None
+
+floors_total: int | None
+
+
+Semantics:
+
+key
+    Framework-independent candidate identity.
+
+    A future SQLAlchemy provider may use:
+    str(building.id)
+
+    The matcher itself must not know this is a database UUID.
+
+
+address_normalized
+    Canonical address representation supplied by the candidate provider.
+
+    ExactBuildingMatcher will compare this with a normalized representation of
+    the listing address.
+
+
+==================================================
+3. BUILDING CANDIDATE INVARIANTS
+==================================================
+
+Validate in __post_init__:
+
+- key must be a non-empty string;
+- address_normalized must be a non-empty string;
+- latitude and longitude must either both be None or both be present;
+- latitude, if present, must be between -90 and 90;
+- longitude, if present, must be between -180 and 180;
+- floors_total, if present, must be > 0.
+
+Raise ValueError with concise messages.
+
+Do not implement geographic distance calculations.
+
+
+==================================================
+4. CANDIDATE PROVIDER CONTRACT
+==================================================
+
+In the same module define:
+
+class BuildingCandidateProvider(ABC)
+
+with one abstract method:
+
+get_candidates(
+    listing: NormalizedListing,
+) -> list[BuildingCandidate]
+
+
+Responsibilities:
+
+The provider is responsible only for supplying plausible building candidates.
+
+It is NOT responsible for deciding which candidate matches.
+
+The matcher owns the matching decision.
+
+
+Do NOT implement SQLAlchemy provider yet.
+
+
+==================================================
+5. EXACT BUILDING MATCHER
+==================================================
+
+Create:
+
+backend/app/matching/exact_building.py
+
+Implement:
+
+class ExactBuildingMatcher(BuildingMatcher)
+
+
+Constructor:
+
+def __init__(
+    self,
+    candidate_provider: BuildingCandidateProvider,
+) -> None
+
+
+match(
+    listing: NormalizedListing,
+) -> BuildingMatchResult
+
+
+==================================================
+6. ADDRESS CANONICALIZATION FOR MVP
+==================================================
+
+For Task #5.7 implement only minimal deterministic address canonicalization.
+
+Create a private helper inside exact_building.py, for example:
+
+_normalize_address(value: str) -> str
+
+
+The MVP normalization must perform ONLY:
+
+1. strip leading/trailing whitespace;
+2. convert to lowercase;
+3. collapse repeated whitespace to one space.
+
+Example:
+
+"  Москва,  Улица Ленина, 1  "
+
+becomes:
+
+"москва, улица ленина, 1"
+
+
+Do NOT:
+
+- transliterate;
+- expand abbreviations;
+- replace "ул." with "улица";
+- parse house number;
+- remove punctuation;
+- use regex-heavy Russian address parsing;
+- use external address services;
+- use fuzzy matching.
+
+This is intentionally minimal.
+
+
+==================================================
+7. EXACT MATCHING RULE
+==================================================
+
+ExactBuildingMatcher must:
+
+1. obtain candidates from candidate_provider;
+
+2. normalize listing["address"] using the MVP helper;
+
+3. compare it with normalized candidate.address_normalized using the same
+   helper;
+
+4. consider exact normalized address equality the primary rule.
+
+
+Cases:
+
+
+CASE A — no candidates
+
+Return:
+
+BuildingMatchResult(
+    matched=False,
+    candidate_key=None,
+    confidence=0.0,
+    reason="no_candidates",
+)
+
+
+CASE B — exactly one exact-address candidate
+
+Return:
+
+matched=True
+
+candidate_key=<candidate.key>
+
+confidence=1.0
+
+reason="exact_address"
+
+
+CASE C — multiple candidates share the same exact normalized address
+
+Use additional deterministic fields only as tie-breakers.
+
+Allowed tie-breakers:
+
+- city;
+- building_type;
+- floors_total.
+
+Do NOT use apartment floor, rooms, area, or price.
+
+
+Tie-break logic must remain simple and explicit.
+
+Preferred behavior:
+
+For each exact-address candidate, compute one point for every non-null field
+that exactly matches the corresponding listing value:
+
+- city
+- building_type
+- floors_total vs listing.total_floors
+
+Choose a candidate only if ONE candidate has a strictly higher score than all
+others.
+
+If exactly one candidate wins:
+
+matched=True
+candidate_key=<winner.key>
+confidence=0.95
+reason="exact_address_tiebreak"
+
+
+If there is still a tie:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="ambiguous_exact_address"
+
+
+CASE D — candidates exist but no exact normalized address match
+
+Return:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="no_exact_address_match"
+
+
+==================================================
+8. IMPORTANT MATCHING RULES
+==================================================
+
+Do NOT use coordinates for matching yet.
+
+Coordinates exist in the candidate contract for future Task(s), but #5.7 is
+strictly exact-address matching.
+
+Do NOT infer matches based on:
+
+- nearby coordinates;
+- same city only;
+- same building type only;
+- same floors_total only.
+
+Exact normalized address equality is mandatory.
+
+
+==================================================
+9. INPUT VALIDATION
+==================================================
+
+If listing["address"] is missing, empty, or whitespace-only:
+
+raise ValueError containing:
+
+address
+
+Do not duplicate other NormalizedListing validation.
+
+
+==================================================
+10. PUBLIC EXPORTS
+==================================================
+
+Update:
+
+backend/app/matching/__init__.py
+
+Export:
+
+BuildingCandidate
+BuildingCandidateProvider
+ExactBuildingMatcher
+
+alongside:
+
+BuildingMatcher
+BuildingMatchResult
+
+
+==================================================
+11. TESTS
+==================================================
+
+Create:
+
+backend/tests/test_exact_building_matcher.py
+
+
+Use a deterministic fake candidate provider.
+
+Do NOT use PostgreSQL.
+Do NOT use SQLAlchemy.
+Do NOT instantiate ORM models.
+
+
+Required tests:
+
+
+TEST 1 — no candidates
+
+Provider returns [].
+
+Expected:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="no_candidates"
+
+
+TEST 2 — exact address match
+
+Listing:
+
+"Москва, улица Ленина, 1"
+
+Candidate:
+
+"Москва, улица Ленина, 1"
+
+Expected:
+
+matched=True
+confidence=1.0
+reason="exact_address"
+
+
+TEST 3 — normalization of case and whitespace
+
+Listing:
+
+"  Москва,   Улица Ленина, 1 "
+
+Candidate:
+
+"москва, улица ленина, 1"
+
+Must match exactly after MVP normalization.
+
+
+TEST 4 — no exact address match
+
+Candidates exist but addresses differ.
+
+Expected:
+
+reason="no_exact_address_match"
+
+
+TEST 5 — two exact candidates resolved by city
+
+Two candidates with the same address.
+
+Only one has matching city.
+
+Expected winner:
+reason="exact_address_tiebreak"
+confidence=0.95
+
+
+TEST 6 — resolved by building_type
+
+Same address.
+
+Only one candidate matches building_type.
+
+
+TEST 7 — resolved by floors_total
+
+Same address.
+
+Only one candidate matches listing.total_floors.
+
+
+TEST 8 — ambiguous exact address
+
+Two candidates have identical scores.
+
+Expected:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="ambiguous_exact_address"
+
+
+TEST 9 — apartment fields do not affect matching
+
+Change:
+
+- rooms;
+- floor;
+- area_sqm;
+- price fields.
+
+Result must remain unchanged.
+
+
+TEST 10 — coordinates do not affect matching
+
+Candidates may contain coordinates.
+
+Changing them must not influence exact-address result in Task #5.7.
+
+
+TEST 11 — invalid listing address
+
+Empty or whitespace-only address raises ValueError containing "address".
+
+
+TEST 12 — candidate invariants
+
+Test invalid:
+
+- empty key;
+- empty address_normalized;
+- latitude without longitude;
+- longitude without latitude;
+- latitude outside [-90, 90];
+- longitude outside [-180, 180];
+- floors_total <= 0.
+
+
+TEST 13 — candidate immutable
+
+BuildingCandidate must be frozen.
+
+
+TEST 14 — provider is abstract
+
+BuildingCandidateProvider itself cannot be instantiated.
+
+
+==================================================
+12. ARCHITECTURAL GUARDRAILS
+==================================================
+
+Do NOT:
+
+- import SQLAlchemy;
+- import ORM models;
+- access PostgreSQL;
+- create Building records;
+- update Building records;
+- perform geocoding;
+- use PostGIS;
+- calculate geographic distance;
+- implement fuzzy matching;
+- use Levenshtein;
+- use external address normalization;
+- create Property matching;
+- persist Listing;
+- deduplicate listings;
+- modify NormalizedListing;
+- modify Normalizer;
+- modify NormalizationService;
+- modify ingestion;
+- modify database models;
+- modify Alembic;
+- modify migrations;
+- add dependencies.
+
+Do not commit.
+
+
+==================================================
+13. FILE SCOPE
+==================================================
+
+Create:
+
+backend/app/matching/candidates.py
+backend/app/matching/exact_building.py
+backend/tests/test_exact_building_matcher.py
+
+Modify only:
+
+backend/app/matching/__init__.py
+
+Do not modify:
+
+backend/app/matching/building.py
+
+unless an import/type issue makes it strictly necessary.
+
+If so, stop and report before expanding scope.
+
+
+==================================================
+14. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+Then run:
+
+git diff --check
+
+
+Also verify that:
+
+backend/app/matching/candidates.py
+backend/app/matching/exact_building.py
+
+do NOT import:
+
+- sqlalchemy;
+- app.models;
+- app.repositories.
+
+
+==================================================
+15. REPORT
+==================================================
+
+Return:
+
+1. contracts discovered during inspection;
+
+2. files created/modified;
+
+3. complete contents of:
+   backend/app/matching/candidates.py
+
+4. complete contents of:
+   backend/app/matching/exact_building.py
+
+5. complete contents of:
+   backend/tests/test_exact_building_matcher.py
+
+6. matching behavior summary for all four cases:
+   - no candidates;
+   - one exact match;
+   - deterministic tie-break;
+   - ambiguous/no match;
+
+7. pytest result;
+
+8. git diff --check result;
+
+9. import guardrail result;
+
+10. git status --short.
+
+Do not commit.
+
+Stop after reporting.
