@@ -17,7 +17,7 @@ class PropertyCandidate:
 
     key: str
     floor: int | None
-    rooms: int | None
+    rooms: int
     is_studio: bool
     area_sqm: float
 
@@ -30,15 +30,19 @@ class PropertyCandidate:
         ):
             raise ValueError("floor must be an int or None")
 
-        if self.rooms is not None and (
+        if (
             isinstance(self.rooms, bool)
             or not isinstance(self.rooms, int)
             or self.rooms < 0
         ):
-            raise ValueError("rooms must be a non-negative int or None")
+            raise ValueError("rooms must be a non-negative int")
 
         if not isinstance(self.is_studio, bool):
             raise ValueError("is_studio must be a bool")
+        if self.is_studio and self.rooms != 0:
+            raise ValueError("rooms must be 0 when is_studio is True")
+        if not self.is_studio and self.rooms < 1:
+            raise ValueError("is_studio must be True when rooms is 0")
 
         if (
             isinstance(self.area_sqm, bool)

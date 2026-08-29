@@ -139,7 +139,7 @@ def test_area_uses_round_half_up(
     [
         {"floor": 6},
         {"rooms": 3},
-        {"is_studio": True},
+        {"rooms": 0, "is_studio": True},
         {"area_sqm": 55.51},
     ],
 )
@@ -271,28 +271,7 @@ def test_invalid_building_key_fails_before_provider_call(
     assert provider.call_count == 0
 
 
-def test_studio_with_nullable_rooms_matches_same_candidate_signature() -> None:
-    matcher, _ = _matcher(
-        [
-            _candidate(
-                rooms=None,
-                is_studio=True,
-            )
-        ]
-    )
-
-    result = matcher.match(
-        listing=_listing(
-            rooms=None,
-            is_studio=True,
-        ),
-        building_key="building-test-001",
-    )
-
-    assert result.matched is True
-
-
-def test_studio_rooms_are_not_coerced() -> None:
+def test_studio_with_zero_rooms_matches_same_candidate_signature() -> None:
     matcher, _ = _matcher(
         [
             _candidate(
@@ -304,7 +283,28 @@ def test_studio_rooms_are_not_coerced() -> None:
 
     result = matcher.match(
         listing=_listing(
-            rooms=None,
+            rooms=0,
+            is_studio=True,
+        ),
+        building_key="building-test-001",
+    )
+
+    assert result.matched is True
+
+
+def test_studio_does_not_match_one_room_apartment() -> None:
+    matcher, _ = _matcher(
+        [
+            _candidate(
+                rooms=1,
+                is_studio=False,
+            )
+        ]
+    )
+
+    result = matcher.match(
+        listing=_listing(
+            rooms=0,
             is_studio=True,
         ),
         building_key="building-test-001",
@@ -343,10 +343,9 @@ def test_property_candidate_rejects_invalid_floor_type() -> None:
         _candidate(floor="5")
 
 
-def test_property_candidate_accepts_nullable_rooms() -> None:
-    candidate = _candidate(rooms=None)
-
-    assert candidate.rooms is None
+def test_property_candidate_rejects_nullable_rooms() -> None:
+    with pytest.raises(ValueError, match="rooms"):
+        _candidate(rooms=None)
 
 
 def test_property_candidate_rejects_negative_rooms() -> None:
@@ -364,6 +363,43 @@ def test_property_candidate_rejects_invalid_is_studio_type() -> None:
         _candidate(is_studio=1)
 
 
+def test_studio_candidate_with_zero_rooms_is_valid() -> None:
+    candidate = _candidate(
+        rooms=0,
+        is_studio=True,
+    )
+
+    assert candidate.rooms == 0
+    assert candidate.is_studio is True
+
+
+def test_non_studio_candidate_with_positive_rooms_is_valid() -> None:
+    candidate = _candidate(
+        rooms=1,
+        is_studio=False,
+    )
+
+    assert candidate.rooms == 1
+    assert candidate.is_studio is False
+
+
+@pytest.mark.parametrize("rooms", [1, 2])
+def test_studio_candidate_rejects_positive_rooms(rooms: int) -> None:
+    with pytest.raises(ValueError, match="rooms|is_studio"):
+        _candidate(
+            rooms=rooms,
+            is_studio=True,
+        )
+
+
+def test_non_studio_candidate_rejects_zero_rooms() -> None:
+    with pytest.raises(ValueError, match="rooms|is_studio"):
+        _candidate(
+            rooms=0,
+            is_studio=False,
+        )
+
+
 @pytest.mark.parametrize("area_sqm", [0, -1])
 def test_property_candidate_rejects_non_positive_area(area_sqm: int) -> None:
     with pytest.raises(ValueError, match="area_sqm"):
@@ -379,9 +415,23 @@ def test_property_candidate_rejects_non_finite_area(area_sqm: float) -> None:
         _candidate(area_sqm=area_sqm)
 
 
-def test_property_candidate_does_not_enforce_studio_rooms_relationship() -> None:
-    nullable_rooms = _candidate(rooms=None, is_studio=True)
-    zero_rooms = _candidate(rooms=0, is_studio=True)
+def test_one_room_apartment_does_not_match_studio() -> None:
+    matcher, _ = _matcher(
+        [
+            _candidate(
+                rooms=0,
+                is_studio=True,
+            )
+        ]
+    )
 
-    assert nullable_rooms.rooms is None
-    assert zero_rooms.rooms == 0
+    result = matcher.match(
+        listing=_listing(
+            rooms=1,
+            is_studio=False,
+        ),
+        building_key="building-test-001",
+    )
+
+    assert result.matched is False
+    assert result.reason == "no_exact_property_signature"

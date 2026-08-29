@@ -60,6 +60,85 @@ def test_mock_normalizer_accepts_rub_currency() -> None:
     assert normalized["asking_price_kopecks"] == 1_250_000_000
 
 
+def test_mock_normalizer_canonicalizes_studio_to_zero_rooms() -> None:
+    raw_listing = _mock_raw_listing()
+    raw_listing["property_type"] = "studio"
+    raw_listing["rooms"] = None
+
+    normalized = MockNormalizer().normalize(raw_listing)
+
+    assert normalized["rooms"] == 0
+    assert normalized["is_studio"] is True
+
+
+def test_mock_normalizer_accepts_studio_without_rooms() -> None:
+    raw_listing = _mock_raw_listing()
+    raw_listing["property_type"] = "studio"
+    raw_listing.pop("rooms")
+
+    normalized = MockNormalizer().normalize(raw_listing)
+
+    assert normalized["rooms"] == 0
+    assert normalized["rooms"] is not None
+
+
+def test_mock_normalizer_studio_output_never_contains_none_rooms() -> None:
+    raw_listing = _mock_raw_listing()
+    raw_listing["property_type"] = "studio"
+    raw_listing["rooms"] = None
+
+    normalized = MockNormalizer().normalize(raw_listing)
+
+    assert normalized["rooms"] == 0
+
+
+def test_mock_normalizer_preserves_non_studio_room_count() -> None:
+    raw_listing = _mock_raw_listing()
+    raw_listing["rooms"] = 2
+
+    normalized = MockNormalizer().normalize(raw_listing)
+
+    assert normalized["rooms"] == 2
+    assert normalized["is_studio"] is False
+
+
+def test_mock_normalizer_keeps_one_room_apartment_distinct_from_studio() -> None:
+    apartment = _mock_raw_listing()
+    apartment["rooms"] = 1
+    apartment["property_type"] = "apartment"
+
+    studio = _mock_raw_listing()
+    studio["property_type"] = "studio"
+    studio["rooms"] = None
+
+    normalized_apartment = MockNormalizer().normalize(apartment)
+    normalized_studio = MockNormalizer().normalize(studio)
+
+    assert normalized_apartment["rooms"] == 1
+    assert normalized_apartment["is_studio"] is False
+    assert normalized_studio["rooms"] == 0
+    assert normalized_studio["is_studio"] is True
+
+
+@pytest.mark.parametrize("rooms", [None, 0, -1])
+def test_mock_normalizer_rejects_invalid_non_studio_rooms(rooms: object) -> None:
+    raw_listing = _mock_raw_listing()
+    raw_listing["property_type"] = "apartment"
+    raw_listing["rooms"] = rooms
+
+    with pytest.raises(ValueError, match="rooms"):
+        MockNormalizer().normalize(raw_listing)
+
+
+def test_mock_normalizer_rejects_nonzero_studio_rooms() -> None:
+    raw_listing = _mock_raw_listing()
+    raw_listing["property_type"] = "studio"
+    raw_listing["rooms"] = 1
+
+    with pytest.raises(ValueError, match="rooms"):
+        MockNormalizer().normalize(raw_listing)
+
+
 def test_mock_normalizer_rejects_missing_currency() -> None:
     raw_listing = _mock_raw_listing()
     raw_listing.pop("currency")

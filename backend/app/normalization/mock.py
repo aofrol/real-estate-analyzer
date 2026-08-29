@@ -44,12 +44,23 @@ class MockNormalizer(Normalizer):
         asking_price_kopecks = int(
             (price_rubles * 100).to_integral_value(rounding=ROUND_HALF_UP)
         )
-        rooms = raw_listing.get("rooms")
+        raw_rooms = raw_listing.get("rooms")
         is_studio = raw_listing.get("property_type") == "studio"
         if is_studio:
-            rooms = None
-        elif rooms is not None:
-            rooms = int(rooms)
+            if raw_rooms not in (None, 0):
+                raise ValueError("rooms must be 0 for a studio")
+            rooms = 0
+        else:
+            if isinstance(raw_rooms, bool) or raw_rooms is None:
+                raise ValueError("rooms must be an integer greater than 0")
+            try:
+                rooms = int(raw_rooms)
+            except (TypeError, ValueError):
+                raise ValueError("rooms must be an integer greater than 0") from None
+            if isinstance(raw_rooms, float) and not raw_rooms.is_integer():
+                raise ValueError("rooms must be an integer greater than 0")
+            if rooms < 1:
+                raise ValueError("rooms must be an integer greater than 0")
 
         listed_at = raw_listing.get("listed_at")
         if isinstance(listed_at, str):

@@ -242,6 +242,7 @@ def test_is_studio_value_is_preserved_exactly() -> None:
     property_row = _property(
         property_id=uuid.uuid4(),
         building_id=building_id,
+        rooms=0,
         is_studio=True,
     )
     session = FakeSession([property_row])

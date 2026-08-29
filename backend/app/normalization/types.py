@@ -12,7 +12,8 @@ class NormalizedListing(TypedDict):
     external_id: str
     address: str
     area_sqm: float
-    rooms: int | None
+    rooms: int
+    # 0 for a studio; >= 1 for a non-studio apartment.
     is_studio: bool
     floor: int | None
     total_floors: int | None

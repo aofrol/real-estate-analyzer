@@ -1,0 +1,862 @@
+Task #5.14 — Studio Rooms Contract Decision and Canonicalization
+
+Goal:
+Resolve the current studio rooms contract mismatch before Property resolution
+and persistence.
+
+Current mismatch:
+
+NormalizedListing.rooms:
+    int | None
+
+MockNormalizer studios:
+    rooms=None
+    is_studio=True
+
+Property.rooms:
+    SmallInteger
+    NOT NULL
+
+PropertyCandidate.rooms:
+    int | None
+
+ConservativePropertyMatcher currently compares rooms exactly.
+
+This task must establish ONE canonical application-wide studio representation.
+
+
+==================================================
+1. TARGET CONTRACT
+==================================================
+
+Adopt this canonical MVP rule:
+
+NON-STUDIO:
+    is_studio=False
+    rooms must be a positive integer >= 1
+
+STUDIO:
+    is_studio=True
+    rooms must be exactly 0
+
+
+Canonical studio representation:
+
+rooms=0
+is_studio=True
+
+
+Do NOT use:
+
+rooms=None
+rooms=1
+
+for studios after this task.
+
+
+==================================================
+2. WHY THIS CONTRACT
+==================================================
+
+The rationale is:
+
+1. Property.rooms is already NOT NULL;
+2. Property.rooms is SmallInteger;
+3. rooms=0 clearly distinguishes studio from a one-room apartment;
+4. is_studio remains the explicit semantic flag;
+5. no database migration is required;
+6. normalization, matching, candidate loading, and future persistence can all
+   use the same representation;
+7. avoiding representation conversion only at persistence prevents mismatch
+   between normalized and persisted data.
+
+
+==================================================
+3. INSPECT FIRST
+==================================================
+
+Before modifying anything, inspect:
+
+backend/app/normalization/types.py
+backend/app/normalization/mock.py
+backend/app/normalization/service.py
+
+backend/app/models/property.py
+
+backend/app/matching/property.py
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+backend/app/matching/sqlalchemy_property_candidates.py
+
+backend/scripts/seed.py
+
+All tests involving:
+
+- NormalizedListing;
+- MockNormalizer;
+- PropertyCandidate;
+- ConservativePropertyMatcher;
+- SQLAlchemyPropertyCandidateProvider;
+- studio behavior.
+
+
+Report before editing:
+
+1. every place that currently assumes studio rooms=None;
+2. every fixture using rooms=None with is_studio=True;
+3. whether any production code branches on rooms is None;
+4. whether seed data contains studios;
+5. whether any schema/migration change is actually required;
+6. exact files that will need modification.
+
+Do not modify before inspection.
+
+
+==================================================
+4. NORMALIZEDLISTING CONTRACT
+==================================================
+
+Modify:
+
+backend/app/normalization/types.py
+
+
+Change:
+
+rooms: int | None
+
+to:
+
+rooms: int
+
+
+The canonical normalized representation must no longer allow None.
+
+
+Add or update documentation/comments if appropriate:
+
+rooms:
+    0 for studio;
+    >= 1 for non-studio.
+
+
+Do NOT add new fields.
+
+
+==================================================
+5. MOCK NORMALIZER
+==================================================
+
+Modify:
+
+backend/app/normalization/mock.py
+
+
+Current studio behavior is expected to resemble:
+
+rooms = None
+
+when:
+
+property_type == "studio"
+
+
+Change this canonicalization to:
+
+rooms = 0
+is_studio = True
+
+
+For non-studio listings:
+
+rooms must remain the supplied integer.
+
+
+==================================================
+6. NORMALIZER VALIDATION
+==================================================
+
+Strengthen MockNormalizer validation so the canonical invariant is enforced.
+
+Required canonical rules:
+
+IF is_studio=True:
+    rooms must equal 0
+
+IF is_studio=False:
+    rooms must be an integer >= 1
+
+
+Do not accept:
+
+studio + rooms=None
+studio + rooms=1
+non-studio + rooms=0
+non-studio + rooms=None
+
+
+IMPORTANT:
+
+Determine how raw studio payloads currently represent rooms.
+
+If raw MockAdapter studio data omits rooms or provides None, that raw input MAY
+still be accepted and canonicalized to rooms=0.
+
+The canonical OUTPUT must always use rooms=0.
+
+
+==================================================
+7. RAW INPUT VS CANONICAL OUTPUT
+==================================================
+
+Keep a clear distinction:
+
+Raw source payload:
+    may omit or inconsistently represent room count for a studio.
+
+NormalizedListing:
+    must always contain canonical:
+
+    rooms=0
+    is_studio=True
+
+
+Do NOT require external source payloads to already use zero.
+
+Normalization owns this conversion.
+
+
+==================================================
+8. PROPERTY CANDIDATE CONTRACT
+==================================================
+
+Modify:
+
+backend/app/matching/property_candidates.py
+
+
+Change:
+
+rooms: int | None
+
+to:
+
+rooms: int
+
+
+Validation:
+
+rooms must:
+
+- be int;
+- not be bool;
+- be >= 0.
+
+
+Then enforce canonical relationship:
+
+IF is_studio is True:
+    rooms must equal 0
+
+IF is_studio is False:
+    rooms must be >= 1
+
+
+Raise ValueError containing either:
+
+rooms
+
+or:
+
+is_studio
+
+as appropriate.
+
+
+==================================================
+9. CONSERVATIVE MATCHER
+==================================================
+
+Inspect:
+
+backend/app/matching/conservative_property.py
+
+
+The matcher should continue exact comparison:
+
+candidate.rooms == listing["rooms"]
+candidate.is_studio == listing["is_studio"]
+
+
+No conversion must exist inside matcher.
+
+Remove/update any comments or assumptions saying studio rooms may be None.
+
+Do NOT add studio-special matching logic.
+
+The purpose of canonicalization is that matcher no longer needs representation
+translation.
+
+
+==================================================
+10. SQLALCHEMY PROPERTY CANDIDATE PROVIDER
+==================================================
+
+Inspect:
+
+backend/app/matching/sqlalchemy_property_candidates.py
+
+
+No representation conversion should be needed.
+
+Keep:
+
+rooms=property_row.rooms
+
+
+Because Property.rooms is NOT NULL and canonical persistence will use:
+
+0 for studio
+>=1 for non-studio
+
+
+Do NOT add:
+
+0 -> None
+
+or any other transformation.
+
+
+==================================================
+11. PROPERTY ORM
+==================================================
+
+Do NOT change:
+
+backend/app/models/property.py
+
+
+Keep:
+
+Property.rooms NOT NULL
+
+
+Do NOT create an Alembic migration.
+
+
+==================================================
+12. OPTIONAL MODEL CHECK CONSTRAINT
+==================================================
+
+Do NOT add a database CHECK constraint in this task.
+
+The current goal is application contract consistency.
+
+A DB-level invariant such as:
+
+(is_studio AND rooms = 0)
+OR
+(NOT is_studio AND rooms >= 1)
+
+may be considered later as a separate schema-hardening task.
+
+
+==================================================
+13. NORMALIZATION SERVICE
+==================================================
+
+Inspect:
+
+backend/app/normalization/service.py
+
+
+It should remain orchestration-only.
+
+Do not introduce studio logic there if MockNormalizer owns canonicalization.
+
+Modify only if typing/docs require it.
+
+Prefer no behavior change.
+
+
+==================================================
+14. PROPERTY MATCH RESULT CONTRACT
+==================================================
+
+Do NOT modify:
+
+backend/app/matching/property.py
+
+
+PropertyMatchResult and PropertyMatcher behavior are unrelated to this change.
+
+
+==================================================
+15. SEED DATA
+==================================================
+
+Inspect:
+
+backend/scripts/seed.py
+
+
+If there is no studio Property/listing:
+
+do not add one.
+
+If studio data exists:
+
+update it to:
+
+rooms=0
+is_studio=True
+
+
+Do not make unrelated seed corrections in this task.
+
+In particular:
+
+do NOT fix unrelated money/price-per-sqm discrepancies here.
+
+
+==================================================
+16. TEST FIXTURES
+==================================================
+
+Update all affected test fixtures so canonical studio listings use:
+
+rooms=0
+is_studio=True
+
+
+Remove tests that assert:
+
+rooms=None
+
+for canonical studio NormalizedListing or PropertyCandidate.
+
+
+Replace them with tests asserting:
+
+rooms=0
+
+
+==================================================
+17. REQUIRED NORMALIZER TESTS
+==================================================
+
+Update/add tests covering:
+
+
+TEST 1 — studio raw payload canonicalizes to zero rooms
+
+Raw studio payload may contain:
+
+rooms=None
+
+or omit rooms according to existing MockAdapter behavior.
+
+Expected normalized output:
+
+rooms == 0
+is_studio is True
+
+
+TEST 2 — non-studio rooms preserved
+
+Example:
+
+rooms=2
+is_studio=False
+
+
+TEST 3 — studio canonical output never contains None
+
+
+TEST 4 — one-room apartment remains distinct from studio
+
+Non-studio:
+
+rooms=1
+is_studio=False
+
+Studio:
+
+rooms=0
+is_studio=True
+
+
+TEST 5 — raw studio does not become one-room apartment
+
+
+==================================================
+18. REQUIRED PROPERTYCANDIDATE TESTS
+==================================================
+
+Update/add tests:
+
+
+TEST 6 — studio candidate valid
+
+PropertyCandidate(
+    rooms=0,
+    is_studio=True,
+    ...
+)
+
+must be valid.
+
+
+TEST 7 — normal apartment candidate valid
+
+rooms=1 or greater
+is_studio=False
+
+
+TEST 8 — rooms=None rejected
+
+
+TEST 9 — negative rooms rejected
+
+
+TEST 10 — bool rooms rejected
+
+
+TEST 11 — studio with rooms=1 rejected
+
+
+TEST 12 — studio with rooms>1 rejected
+
+
+TEST 13 — non-studio with rooms=0 rejected
+
+
+==================================================
+19. REQUIRED MATCHER TESTS
+==================================================
+
+Update studio matcher tests.
+
+
+TEST 14 — studio matches studio
+
+Listing:
+
+rooms=0
+is_studio=True
+
+Candidate:
+
+rooms=0
+is_studio=True
+
+Expected:
+
+matched=True
+
+assuming floor and area match.
+
+
+TEST 15 — studio does not match one-room apartment
+
+Listing:
+
+rooms=0
+is_studio=True
+
+Candidate:
+
+rooms=1
+is_studio=False
+
+Expected:
+
+no_exact_property_signature
+
+
+TEST 16 — one-room apartment does not match studio
+
+Listing:
+
+rooms=1
+is_studio=False
+
+Candidate:
+
+rooms=0
+is_studio=True
+
+Expected:
+
+no_exact_property_signature
+
+
+Remove the previous semantic test:
+
+studio listing rooms=None vs candidate rooms=0
+
+because None is no longer part of canonical NormalizedListing.
+
+
+==================================================
+20. SQLALCHEMY PROVIDER TESTS
+==================================================
+
+Update affected tests in:
+
+backend/tests/test_sqlalchemy_property_candidate_provider.py
+
+
+Keep/confirm:
+
+Property ORM:
+
+rooms=0
+is_studio=True
+
+maps to:
+
+PropertyCandidate(
+    rooms=0,
+    is_studio=True,
+    ...
+)
+
+
+Remove wording that describes rooms=0 as an unresolved studio representation.
+
+It is now canonical.
+
+
+==================================================
+21. TYPING CONSISTENCY
+==================================================
+
+Search the repository for:
+
+rooms=None
+
+and:
+
+"rooms": None
+
+and relevant Optional/int | None annotations.
+
+
+Classify every occurrence.
+
+Change only occurrences representing canonical apartment room count.
+
+Do NOT blindly replace unrelated nullable fields or raw payload test cases.
+
+
+After changes there should be no production canonical type asserting:
+
+NormalizedListing.rooms is None
+
+or:
+
+PropertyCandidate.rooms is None
+
+
+==================================================
+22. NO DATABASE MIGRATION
+==================================================
+
+Explicitly verify:
+
+No Alembic migration is required because:
+
+Property.rooms is already NOT NULL
+and rooms=0 fits existing SmallInteger storage.
+
+
+Do not alter baseline migration.
+
+
+==================================================
+23. FILE SCOPE
+==================================================
+
+Expected modified production files:
+
+backend/app/normalization/types.py
+backend/app/normalization/mock.py
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+
+Possibly:
+
+backend/app/matching/sqlalchemy_property_candidates.py
+
+only if comments/types require adjustment.
+
+Possibly:
+
+backend/scripts/seed.py
+
+only if studio data exists.
+
+
+Modify affected tests as required.
+
+
+Do NOT modify:
+
+Property ORM schema
+Building ORM schema
+Listing ORM schema
+Alembic migrations
+repositories
+persistence services
+resolution services
+database configuration
+dependencies
+
+
+If inspection reveals a schema change is actually necessary:
+
+STOP and report before changing schema.
+
+
+==================================================
+24. ARCHITECTURAL RULE
+==================================================
+
+After Task #5.14 there must be exactly one canonical semantic representation:
+
+STUDIO:
+
+rooms=0
+is_studio=True
+
+
+NON-STUDIO:
+
+rooms>=1
+is_studio=False
+
+
+Raw adapters may contain source-specific representations.
+
+Normalizer converts raw source representation into this canonical contract.
+
+Matching and persistence must not perform additional room-count translation.
+
+
+==================================================
+25. VALIDATION
+==================================================
+
+Run the full relevant test set:
+
+pytest \
+    tests/test_mock_normalizer.py \
+    tests/test_normalizer_interface.py \
+    tests/test_normalization_service.py \
+    tests/test_property_matcher_contract.py \
+    tests/test_conservative_property_matcher.py \
+    tests/test_sqlalchemy_property_candidate_provider.py \
+    tests/test_building_persistence_service.py \
+    tests/test_building_resolution_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then run:
+
+git diff --check
+
+
+Then search canonical code:
+
+grep -R 'rooms: int | None' backend/app || true
+
+grep -R '"rooms": None' backend/app backend/tests || true
+
+grep -R 'rooms=None' backend/app backend/tests || true
+
+
+Review results manually.
+
+Raw-source studio fixtures are allowed to use None only if they are explicitly
+testing source input canonicalization.
+
+Canonical NormalizedListing and PropertyCandidate fixtures must not use None.
+
+
+==================================================
+26. CONTRACT GUARDRAIL
+==================================================
+
+Add or run a lightweight guardrail confirming:
+
+NormalizedListing.rooms annotation is:
+
+int
+
+and:
+
+PropertyCandidate.rooms annotation is:
+
+int
+
+
+Also verify MockNormalizer canonical studio output:
+
+rooms == 0
+is_studio is True
+
+
+==================================================
+27. REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+
+2. list of every existing studio rooms=None assumption found;
+
+3. final canonical studio contract;
+
+4. explanation why rooms=0 was selected;
+
+5. exact NormalizedListing change;
+
+6. exact MockNormalizer change;
+
+7. exact PropertyCandidate change;
+
+8. statement whether ConservativePropertyMatcher required behavioral changes;
+
+9. statement whether SQLAlchemyPropertyCandidateProvider required behavioral
+   changes;
+
+10. statement whether Property ORM required changes;
+
+11. statement whether Alembic migration was required;
+
+12. files modified;
+
+13. complete updated contents of every modified production file;
+
+14. relevant updated/new tests;
+
+15. pytest result;
+
+16. git diff --check result;
+
+17. grep/search audit result;
+
+18. canonical contract guardrail result;
+
+19. git status --short.
+
+Do not commit.
+
+Stop after reporting.
