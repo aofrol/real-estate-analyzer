@@ -1,0 +1,1337 @@
+Task #5.17 — Listing Identity & Persistence Contract
+
+Goal:
+Define and document the application/domain contract for Listing identity,
+same-source listing reuse, price-change behavior, and cross-source duplication.
+
+This task is DESIGN + CONTRACT ONLY.
+
+Do NOT implement Listing persistence yet.
+Do NOT modify ORM models.
+Do NOT create Alembic migrations.
+Do NOT modify database schema.
+Do NOT implement deduplication.
+Do NOT implement price-history writes.
+Do NOT modify ingestion behavior.
+
+The goal is to remove ambiguity before Task #5.18.
+
+
+CURRENT PIPELINE CONTEXT
+
+Raw source payload
+      ↓
+RawListing
+      ↓
+Normalizer
+      ↓
+NormalizedListing
+      ↓
+Building resolution/persistence
+      ↓
+Property resolution/persistence
+      ↓
+[ NEXT BOUNDARY ]
+Listing identity + persistence
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before creating or modifying anything, inspect:
+
+backend/app/models/listing.py
+backend/app/models/listing_price_history.py
+backend/app/models/raw_listing.py
+backend/app/models/source.py
+backend/app/models/property.py
+
+backend/app/repositories/raw_listing.py
+backend/app/repositories/sqlalchemy_raw_listing.py
+
+backend/app/ingestion/service.py
+
+backend/app/normalization/types.py
+
+backend/scripts/seed.py
+
+docs/database-design-v0.1.md
+docs/data-pipeline-v0.1.md
+docs/architecture-map.md
+
+Relevant tests for Listing / RawListing / seed / ingestion if present.
+
+
+Report inspection findings before design.
+
+Specifically report:
+
+1. exact Listing ORM fields;
+2. Listing nullability and defaults;
+3. all Listing indexes;
+4. all Listing unique constraints;
+5. exact meaning currently implied by duplicate_of_id;
+6. exact Listing self-FK behavior;
+7. exact ListingPriceHistory fields;
+8. exact RawListing identity constraints;
+9. exact Source fields relevant to identity;
+10. how seed currently creates Listing;
+11. whether any Listing repository/service already exists;
+12. whether any listing deduplication logic already exists;
+13. whether any price-history service already exists;
+14. whether current schema can represent:
+    - repeated observation of the same listing;
+    - same physical Property advertised on multiple sources;
+    - multiple different listings for the same Property on one source;
+    - canonical listing + duplicates.
+
+Do not modify files before inspection.
+
+
+==================================================
+2. DO NOT ASSUME RAWLISTING AND LISTING HAVE THE SAME IDENTITY
+==================================================
+
+Treat these as distinct concepts:
+
+RawListing:
+    one persisted source payload / ingestion artifact
+
+Listing:
+    one normalized marketplace advertisement identity
+
+Property:
+    one physical real-estate object
+
+
+Do not collapse them into one concept.
+
+
+==================================================
+3. DEFINE THREE DIFFERENT IDENTITIES
+==================================================
+
+The contract must explicitly distinguish:
+
+A. PHYSICAL PROPERTY IDENTITY
+
+Represents:
+    the real-world apartment/unit.
+
+Owned by:
+    Property.
+
+
+B. SOURCE LISTING IDENTITY
+
+Represents:
+    one advertisement as identified by one marketplace/source.
+
+Conceptual key:
+
+    source_id + external_id
+
+
+C. CROSS-SOURCE OFFER IDENTITY
+
+Represents:
+    the hypothesis that two different source listings describe the same
+    commercial offer.
+
+This must NOT be treated as hard identity.
+
+Cross-source equivalence is probabilistic / heuristic and belongs to a later
+deduplication layer.
+
+
+==================================================
+4. REQUIRED PRIMARY CONTRACT DECISION
+==================================================
+
+Unless inspection proves the schema makes this impossible, adopt this rule:
+
+Within one Source:
+
+    (source_id, external_id)
+
+is the hard identity of a Listing.
+
+
+Meaning:
+
+Same source_id + same external_id:
+    same Listing identity.
+
+Different source_id:
+    different Listing identity even if external_id strings are equal.
+
+Different external_id:
+    different Listing identity even when Property is the same.
+
+
+Do NOT use:
+
+property_id
+
+as the hard identity of Listing.
+
+
+One Property may have multiple Listings.
+
+
+==================================================
+5. SAME-SOURCE REOBSERVATION RULE
+==================================================
+
+Define expected behavior when the same:
+
+source_id + external_id
+
+is collected again.
+
+
+Preferred contract:
+
+If Listing already exists for:
+
+    source_id + external_id
+
+then:
+
+- reuse the existing Listing row;
+- do not create a second Listing solely because it was observed again;
+- update mutable marketplace state where appropriate;
+- record price change through ListingPriceHistory in a later dedicated service;
+- preserve the stable Listing id.
+
+
+This task must define the rule but MUST NOT implement it.
+
+
+==================================================
+6. PROPERTY RELATIONSHIP
+==================================================
+
+Define:
+
+Listing.property_id
+
+as:
+
+the physical Property currently associated with the advertisement.
+
+
+Expected invariant:
+
+A Listing points to exactly one Property.
+
+
+However:
+
+One Property may have:
+
+- one Listing;
+- multiple Listings on one source;
+- Listings across multiple sources.
+
+
+Therefore:
+
+property_id is NOT unique.
+
+
+Do not propose a unique constraint on property_id.
+
+
+==================================================
+7. SOURCE RELATIONSHIP
+==================================================
+
+Inspect Listing.source_id.
+
+
+Define source_id as:
+
+the marketplace/source that owns the external listing identity.
+
+
+Expected hard identity:
+
+source_id + external_id
+
+
+Do not use source_url as identity.
+
+
+URLs may change.
+
+
+==================================================
+8. EXTERNAL ID CONTRACT
+==================================================
+
+Define external_id as:
+
+the source-native stable advertisement identifier.
+
+
+Rules:
+
+- non-empty;
+- meaningful only within Source namespace;
+- opaque application value;
+- do not parse business meaning from it;
+- do not assume numeric;
+- do not assume globally unique.
+
+
+Do not canonicalize different source IDs into one ID.
+
+
+==================================================
+9. DUPLICATE_OF_ID SEMANTICS
+==================================================
+
+Inspect current self-FK.
+
+Define duplicate_of_id explicitly.
+
+
+Preferred contract:
+
+duplicate_of_id means:
+
+    "this Listing has been classified as a duplicate of another Listing
+     representing the same commercial offer"
+
+
+It does NOT mean:
+
+- same Property;
+- same source identity;
+- superseded Listing;
+- previous version;
+- price-history predecessor;
+- raw snapshot lineage.
+
+
+==================================================
+10. CANONICAL LISTING RULE
+==================================================
+
+Define the canonical relationship:
+
+Canonical Listing:
+    duplicate_of_id IS NULL
+
+
+Duplicate Listing:
+    duplicate_of_id points directly to a canonical Listing.
+
+
+Preferred invariant for MVP:
+
+Do NOT create duplicate chains.
+
+
+Invalid conceptual structure:
+
+A -> B -> C
+
+
+Preferred:
+
+B -> A
+C -> A
+
+
+where A is canonical.
+
+
+Document this as a future persistence/dedup guardrail.
+
+
+Do NOT implement validation or migration in this task.
+
+
+==================================================
+11. SAME-SOURCE DUPLICATE VS CROSS-SOURCE DUPLICATE
+==================================================
+
+Explicitly distinguish:
+
+Same source + same external_id:
+    SAME LISTING
+    → reuse Listing row
+
+Different source and/or different external_id but heuristic says same offer:
+    DIFFERENT LISTING ROWS
+    → may later relate through duplicate_of_id
+
+
+This distinction is critical.
+
+
+==================================================
+12. MULTIPLE LISTINGS FOR ONE PROPERTY
+==================================================
+
+The contract must explicitly allow:
+
+Property A
+    ├── Listing source X / external 100
+    ├── Listing source X / external 200
+    └── Listing source Y / external ABC
+
+
+These are three Listing identities.
+
+
+They may represent:
+
+- different brokers;
+- owner vs broker;
+- repost;
+- distinct commercial offers;
+- duplicate advertisements.
+
+
+Do not merge solely because property_id matches.
+
+
+==================================================
+13. PRICE CHANGE CONTRACT
+==================================================
+
+Inspect:
+
+Listing.asking_price
+or equivalent Listing price fields
+
+and:
+
+ListingPriceHistory.
+
+
+Define this behavior conceptually:
+
+When an existing Listing is observed again with a different asking price:
+
+1. same Listing identity remains;
+2. Listing current asking price is updated;
+3. ListingPriceHistory records the observation/change;
+4. a new Listing row is NOT created solely because price changed.
+
+
+Do NOT implement this yet.
+
+
+==================================================
+14. PRICE HISTORY SEMANTICS
+==================================================
+
+Determine from schema whether ListingPriceHistory represents:
+
+A. every observed price snapshot
+
+or
+
+B. only price changes.
+
+
+If schema/docs do not clearly decide:
+
+recommend one contract.
+
+
+Preferred MVP recommendation:
+
+ListingPriceHistory should record a row when the persisted current price
+changes.
+
+Reason:
+
+- avoids unnecessary duplicate history rows;
+- simple MVP semantics;
+- current Listing row remains latest state.
+
+
+If the existing docs already explicitly define another behavior, report the
+conflict instead of silently changing the meaning.
+
+
+==================================================
+15. LISTING MUTABLE STATE
+==================================================
+
+Inspect fields such as:
+
+status
+asking_price
+url
+listed_at
+last_seen_at
+updated_at
+or equivalents.
+
+
+Classify Listing fields into:
+
+A. IDENTITY / STABLE
+
+Examples conceptually:
+
+id
+source_id
+external_id
+
+
+B. RELATIONAL
+
+property_id
+duplicate_of_id
+
+
+C. MUTABLE MARKETPLACE STATE
+
+price
+status
+url
+last_seen timestamps
+etc.
+
+
+D. AUDIT / SYSTEM
+
+created_at
+updated_at
+
+
+Use actual schema field names.
+
+
+==================================================
+16. PROPERTY REASSIGNMENT DECISION
+==================================================
+
+Define what happens if the same hard Listing identity:
+
+source_id + external_id
+
+later resolves to another Property.
+
+
+Do NOT silently choose without discussion.
+
+
+Preferred MVP contract:
+
+Treat this as a data-consistency conflict.
+
+Do NOT silently reassign property_id during ordinary persistence.
+
+
+Reason:
+
+Hard source identity should not unexpectedly migrate between physical units.
+
+
+Future handling may include:
+
+- review;
+- rematching workflow;
+- explicit reassignment service.
+
+
+For Task #5.18, recommend:
+
+existing Listing + different property_id
+    → fail closed with ValueError
+
+
+Document this recommendation.
+
+
+==================================================
+17. SOURCE REASSIGNMENT
+==================================================
+
+Existing Listing source_id must never be changed during normal persistence.
+
+A Listing identity cannot migrate from one Source namespace to another.
+
+
+==================================================
+18. EXTERNAL ID REASSIGNMENT
+==================================================
+
+Existing Listing external_id must never be changed during normal persistence.
+
+Changing external_id means a different source identity.
+
+
+==================================================
+19. DUPLICATE REASSIGNMENT
+==================================================
+
+Do NOT let ordinary ListingPersistenceService decide duplicate_of_id.
+
+
+duplicate_of_id must be owned by a later dedicated cross-source
+deduplication/classification service.
+
+
+Therefore Task #5.18 should:
+
+- create Listing with duplicate_of_id=None;
+- preserve existing duplicate_of_id when reusing a Listing;
+- never clear or rewrite duplicate_of_id as side effect of normal persistence.
+
+
+Document this as required future behavior.
+
+
+==================================================
+20. RAWLISTING IDENTITY CONFLICT
+==================================================
+
+Inspect current RawListing unique constraints.
+
+
+We already suspect:
+
+UNIQUE(source_id, external_id)
+
+
+may conflict with the desired concept of RawListing as an immutable ingestion
+journal.
+
+
+Analyze explicitly.
+
+
+Answer:
+
+Can current RawListing schema store multiple observations of the same
+source_id + external_id?
+
+
+If NO:
+
+state clearly:
+
+current RawListing schema represents one raw record per source listing identity,
+not an immutable multi-snapshot journal.
+
+
+Do NOT modify schema in this task.
+
+
+==================================================
+21. RAW JOURNAL DECISION
+==================================================
+
+Make an explicit recommendation for future work.
+
+
+Compare at least these options:
+
+OPTION A
+Keep current UNIQUE(source_id, external_id)
+
+Meaning:
+RawListing is latest/first raw payload per source listing identity.
+
+Pros:
+- simple;
+- idempotent;
+- no schema change.
+
+Cons:
+- no immutable ingestion history.
+
+
+OPTION B
+Allow multiple RawListing observations
+
+Possible identity conceptually:
+
+source_id
+external_id
+collected_at
+
+or:
+
+source_id
+external_id
+content_hash
+collected_at
+
+
+Pros:
+- true raw audit journal;
+- source changes preserved;
+- replay/debugging easier.
+
+Cons:
+- schema/migration;
+- more storage;
+- ingestion idempotency complexity.
+
+
+Recommend one for the product architecture.
+
+Do NOT implement it.
+
+
+==================================================
+22. RECOMMENDED RAW JOURNAL DECISION
+==================================================
+
+Unless inspection exposes a strong reason otherwise, recommend:
+
+For MVP:
+
+keep current RawListing uniqueness temporarily
+and explicitly classify it as:
+
+"latest/raw source record per source listing identity"
+
+NOT a true immutable journal.
+
+
+Create a documented technical-debt item:
+
+"RawListing observation history / immutable ingestion journal"
+
+
+Reason:
+
+Listing persistence can proceed without blocking MVP.
+
+
+Do NOT change the database in Task #5.17.
+
+
+==================================================
+23. LISTING UNIQUE CONSTRAINT ANALYSIS
+==================================================
+
+Inspect whether Listing currently has a DB unique constraint on:
+
+(source_id, external_id)
+
+
+If YES:
+
+document that schema already enforces hard source listing identity.
+
+
+If NO:
+
+report this as a schema-hardening gap.
+
+
+Do NOT add the constraint in this task.
+
+
+Recommend whether it should be added before or after Task #5.18.
+
+
+Important:
+
+If Listing lacks this unique constraint, application-level lookup alone has a
+race condition under concurrent ingestion.
+
+
+Explicitly discuss that.
+
+
+==================================================
+24. CONCURRENCY / RACE CONDITION CONTRACT
+==================================================
+
+Document:
+
+Application logic:
+
+lookup source_id + external_id
+then create if absent
+
+is not sufficient under concurrent workers unless database uniqueness exists.
+
+
+If Listing lacks DB uniqueness, classify this as:
+
+"concurrent duplicate Listing race"
+
+
+Recommend future DB hardening:
+
+UNIQUE(source_id, external_id)
+
+
+Do NOT create migration in this task.
+
+
+==================================================
+25. LISTING STATUS CONTRACT
+==================================================
+
+Inspect allowed/current status behavior.
+
+
+Define whether repeated collection may update status.
+
+
+Examples:
+
+active
+inactive
+removed
+sold
+expired
+
+
+Use only actual supported schema values if constrained.
+
+
+If schema contains a plain string without CHECK constraint:
+
+do not invent a closed enum.
+
+
+Document current reality.
+
+
+==================================================
+26. LISTED_AT SEMANTICS
+==================================================
+
+If Listing has listed_at:
+
+define it as:
+
+source-reported original publication timestamp
+
+not:
+
+last observation time.
+
+
+Do not overwrite listed_at with current collection time unless source actually
+reports a new publication value and future policy explicitly allows it.
+
+
+==================================================
+27. LAST SEEN / COLLECTION TIME
+==================================================
+
+Inspect whether Listing has a field representing last observation.
+
+
+If present:
+
+document expected repeated-ingestion behavior.
+
+
+If absent:
+
+report the gap.
+
+
+Do NOT add schema fields in this task.
+
+
+==================================================
+28. LISTING URL CONTRACT
+==================================================
+
+If URL field exists:
+
+treat it as mutable source metadata, not identity.
+
+
+Same Listing identity may update URL.
+
+
+Do not use URL as uniqueness key.
+
+
+==================================================
+29. PRICE PER SQM
+==================================================
+
+Inspect whether Listing stores both:
+
+asking_price
+asking_price_per_sqm
+
+
+Define expected behavior:
+
+These values must remain coherent.
+
+
+NormalizedListing already provides canonical:
+
+asking_price_kopecks
+asking_price_per_sqm_kopecks
+
+
+Task #5.18 should map them directly according to ORM field semantics.
+
+
+Do not recalculate price_per_sqm in persistence unless schema requires a
+different representation.
+
+
+==================================================
+30. MONEY UNIT AUDIT
+==================================================
+
+Inspect Listing and ListingPriceHistory price field types/names.
+
+
+Confirm whether they represent:
+
+- kopecks;
+- rubles;
+- another legacy convention.
+
+
+Compare against canonical application contract:
+
+NormalizedListing:
+    asking_price_kopecks
+    asking_price_per_sqm_kopecks
+
+
+If ORM naming or seed values are ambiguous:
+
+report exact evidence.
+
+
+Do NOT silently change units.
+
+
+==================================================
+31. DEFINE FUTURE LISTING PERSISTENCE INPUT
+==================================================
+
+Recommend the API shape for Task #5.18.
+
+
+Preferred concept:
+
+class ListingPersistenceService:
+
+    def persist(
+        self,
+        *,
+        source_id: UUID,
+        property_id: UUID,
+        listing: NormalizedListing,
+    ) -> Listing:
+        ...
+
+
+Or, if existing architecture consistently uses string application keys:
+
+    source_key: str
+    property_key: str
+
+
+Analyze consistency with BuildingPersistenceService and
+PropertyPersistenceService.
+
+
+Recommend one exact future signature.
+
+
+Do NOT implement it.
+
+
+==================================================
+32. FUTURE TASK #5.18 EXPECTED BEHAVIOR
+==================================================
+
+Define the future ListingPersistenceService contract.
+
+
+CREATE CASE:
+
+No Listing for:
+
+source_id + external_id
+
+Then:
+
+- verify Source exists;
+- verify Property exists;
+- create Listing;
+- duplicate_of_id=None;
+- map canonical current state;
+- add;
+- flush;
+- no commit.
+
+
+REUSE CASE:
+
+Listing already exists for:
+
+source_id + external_id
+
+Then:
+
+- verify same source identity;
+- verify property_id matches;
+- preserve Listing.id;
+- preserve duplicate_of_id;
+- update allowed mutable fields;
+- do not create new Listing;
+- flush only if necessary / according to implementation style;
+- no commit.
+
+
+PROPERTY CONFLICT:
+
+Existing Listing resolves to different Property
+
+→ fail closed.
+
+
+Do not implement.
+
+
+==================================================
+33. FUTURE TASK #5.19 PRICE HISTORY BOUNDARY
+==================================================
+
+Recommend keeping price-history behavior separate from ordinary Listing
+identity logic.
+
+
+Conceptual future service:
+
+ListingPriceHistoryService
+
+
+Responsibility:
+
+- compare previous/current asking price;
+- create history row according to agreed history semantics;
+- not own transaction;
+- not decide listing identity;
+- not perform deduplication.
+
+
+Do NOT implement.
+
+
+==================================================
+34. FUTURE TASK #5.20 DEDUP BOUNDARY
+==================================================
+
+Define cross-source duplicate detection as a separate concern.
+
+
+Conceptual flow:
+
+Listing candidates
+      ↓
+Dedup Matcher / Classifier
+      ↓
+Dedup Resolution
+      ↓
+duplicate_of_id assignment
+
+
+Do not let ListingPersistenceService infer duplication from:
+
+- same Property;
+- same price;
+- same area;
+- same URL pattern;
+- same address.
+
+
+Do NOT implement.
+
+
+==================================================
+35. REQUIRED DECISION TABLE
+==================================================
+
+Create a decision table covering at least:
+
+CASE 1
+same source_id
+same external_id
+same property
+same price
+
+→ reuse Listing
+
+
+CASE 2
+same source_id
+same external_id
+same property
+changed price
+
+→ reuse Listing
+→ later price-history update
+
+
+CASE 3
+same source_id
+same external_id
+different property
+
+→ consistency error
+
+
+CASE 4
+same source_id
+different external_id
+same property
+
+→ different Listings
+
+
+CASE 5
+different source_id
+same external_id
+same property
+
+→ different Listings
+
+
+CASE 6
+different source_id
+different external_id
+same property
+
+→ different Listings
+
+
+CASE 7
+different Listings later classified same commercial offer
+
+→ separate rows
+→ duplicate_of_id relationship via later dedup layer
+
+
+CASE 8
+same Listing observed repeatedly
+
+→ stable Listing.id
+
+
+==================================================
+36. CREATE CONTRACT DOCUMENT
+==================================================
+
+Create:
+
+docs/listing-identity-contract-v0.1.md
+
+
+The document must include:
+
+1. Purpose
+2. Terminology
+3. Identity layers
+4. Hard Listing identity
+5. Relationship to Property
+6. Relationship to Source
+7. Reobservation behavior
+8. Mutable vs immutable Listing fields
+9. Price-change behavior
+10. ListingPriceHistory semantics
+11. duplicate_of_id semantics
+12. canonical duplicate rule
+13. property reassignment conflict
+14. RawListing identity analysis
+15. immutable raw journal gap
+16. concurrency/race-condition analysis
+17. future ListingPersistenceService contract
+18. future PriceHistory service boundary
+19. future Dedup service boundary
+20. decision table
+21. unresolved technical debt
+22. explicit non-goals
+
+
+==================================================
+37. OPTIONAL TECHNICAL DEBT UPDATE
+==================================================
+
+Inspect:
+
+docs/technical-debt.md
+
+
+If it exists and its style supports a small addition, modify it only to add
+clearly identified debt items discovered here, for example:
+
+- RawListing does not support immutable multi-observation journal.
+- Listing source identity may lack DB unique constraint.
+- Listing last_seen/observation timestamp may be absent.
+- duplicate chain prevention may not be DB-enforced.
+
+
+Do not invent items unsupported by inspection.
+
+
+If modifying technical-debt.md would create unnecessary scope, leave it
+unchanged and list debt only in the new contract document.
+
+
+==================================================
+38. TESTS
+==================================================
+
+No production behavior is added in this task.
+
+
+Do NOT add extensive runtime tests.
+
+
+If useful, add one lightweight contract/schema test only if there is already a
+similar documentation/schema-contract testing convention.
+
+
+Otherwise:
+
+no new pytest file is required.
+
+
+==================================================
+39. FILE SCOPE
+==================================================
+
+Expected creation:
+
+docs/listing-identity-contract-v0.1.md
+
+
+Optional modification:
+
+docs/technical-debt.md
+
+
+Do NOT modify:
+
+backend/app/models/*
+backend/app/matching/*
+backend/app/resolution/*
+backend/app/persistence/*
+backend/app/normalization/*
+backend/app/ingestion/*
+backend/app/repositories/*
+backend/scripts/*
+alembic/*
+frontend/*
+requirements/dependencies
+
+
+If a code/schema change appears necessary:
+
+STOP and report it instead.
+
+
+==================================================
+40. VALIDATION
+==================================================
+
+Run:
+
+git diff --check
+
+
+Run a schema/code scope guardrail:
+
+git diff -- backend/app alembic frontend
+
+
+Expected:
+
+no changes.
+
+
+If docs/technical-debt.md is modified, that is allowed.
+
+
+Optionally run the existing relevant regression suite to ensure no accidental
+code changes, but do not spend excessive time because this is a documentation
+contract task.
+
+
+==================================================
+41. FINAL REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+
+2. exact Listing ORM schema relevant to identity;
+
+3. exact ListingPriceHistory schema;
+
+4. exact RawListing identity behavior;
+
+5. whether current RawListing is a real immutable journal;
+
+6. exact hard Listing identity decision;
+
+7. exact Property relationship decision;
+
+8. exact same-source reobservation behavior;
+
+9. exact price-change behavior;
+
+10. exact duplicate_of_id semantics;
+
+11. canonical duplicate rule;
+
+12. property reassignment behavior;
+
+13. Listing unique-constraint analysis;
+
+14. concurrency/race-condition analysis;
+
+15. RawListing journal recommendation;
+
+16. recommended Task #5.18 API;
+
+17. future Task #5.18 create/reuse/conflict behavior;
+
+18. future Task #5.19 PriceHistory boundary;
+
+19. future Task #5.20 Dedup boundary;
+
+20. complete decision table;
+
+21. unresolved technical debt;
+
+22. files created/modified;
+
+23. complete contents of:
+    docs/listing-identity-contract-v0.1.md
+
+24. complete diff/addition to docs/technical-debt.md if modified;
+
+25. git diff --check result;
+
+26. code/schema scope guardrail result;
+
+27. git status --short.
+
+Do not commit.
+
+Stop after reporting.
