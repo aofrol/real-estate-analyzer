@@ -280,6 +280,7 @@ def test_reuse_updates_only_supported_mutable_fields() -> None:
     assert existing.removed_at == datetime(2026, 8, 28)
     assert existing.duplicate_of_id is not None
     assert existing.extra == {"keep": True}
+    assert session.added == []
     assert session.flush_calls == 1
 
 

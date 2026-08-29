@@ -404,9 +404,10 @@ BTREE(listing_id, recorded_at DESC)
 
 Model docstring говорит, что history row создаётся при каждом обновлении
 `asking_price`. Текущая модель не различает snapshots и changes отдельным
-полем, а отдельного price-history service нет.
+полем. Историческая persistence изолирована в `ListingPriceHistoryService`;
+`ListingPersistenceService` отвечает только за current Listing state.
 
-Рекомендация для MVP:
+Правило MVP:
 
 ```text
 создавать ListingPriceHistory row только когда persisted current price
@@ -414,8 +415,7 @@ Model docstring говорит, что history row создаётся при к�
 ```
 
 Это избегает повторных одинаковых rows при неизменной цене и согласуется с
-текущим смыслом «хронология изменений цены». Политика должна быть реализована
-отдельным `ListingPriceHistoryService`, а не смешиваться с Listing identity.
+текущим смыслом «хронология изменений цены».
 
 ## 16. duplicate_of_id semantics
 
@@ -755,9 +755,9 @@ Task #5.18 не принимает cross-source dedup decisions:
 - reuse сохраняет существующий `duplicate_of_id`;
 - обычная persistence не очищает и не переписывает duplicate relationship.
 
-## 24. Future Task #5.19 PriceHistory boundary
+## 24. PriceHistory boundary
 
-Рекомендуемый отдельный сервис:
+Отдельный сервис исторической persistence:
 
 ```python
 class ListingPriceHistoryService:
@@ -766,16 +766,33 @@ class ListingPriceHistoryService:
 
 Его ответственность:
 
-- сравнить предыдущую и новую текущую цену;
+- принять предыдущую и новую текущую цену;
+- сравнить их и вернуть `None`, если цена не изменилась;
 - добавить `ListingPriceHistory`, если цена изменилась;
+- сохранить новую наблюдаемую цену в `ListingPriceHistory.asking_price`;
+- выполнить `add()` и один `flush()` только для изменения;
 - использовать kopecks;
 - не определять Listing identity;
 - не менять `property_id`;
 - не выполнять deduplication;
 - не владеть transaction lifecycle.
 
-Listing persistence может обновить current price, но history policy должна быть
-изолирована и тестируема отдельно.
+`ListingPersistenceService` сохраняет только current Listing state: identity,
+Property consistency, current prices, URL, `listed_at` и
+`duplicate_of_id` preservation. Он не создаёт history rows и не вызывает
+`ListingPriceHistoryService`.
+
+Для существующего Listing orchestration выполняет операции в таком порядке:
+
+1. захватывает persisted previous asking price;
+2. определяет новую canonical price;
+3. сохраняет или обновляет current Listing state;
+4. вызывает `ListingPriceHistoryService`, если previous и new price различаются;
+5. caller commits enclosing transaction.
+
+Обе persistence-операции участвуют в одной транзакции, которой владеет caller.
+Если history persistence завершается ошибкой, внешний orchestration может
+откатить всю транзакцию.
 
 ## 25. Future Task #5.20 Dedup boundary
 

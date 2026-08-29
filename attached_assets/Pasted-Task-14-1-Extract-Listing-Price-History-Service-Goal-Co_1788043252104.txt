@@ -1,0 +1,515 @@
+Task #14.1 — Extract Listing Price History Service
+
+Goal:
+Correct Task #14 architecture by extracting price-history persistence from
+ListingPersistenceService into a dedicated ListingPriceHistoryService.
+
+This is an architectural correction.
+
+The existing behavior is functionally correct:
+- history is created only when price changes;
+- unchanged price creates no history;
+- new Listing creates no history;
+- transaction ownership stays with caller.
+
+But ListingPersistenceService must NOT own ListingPriceHistory persistence.
+
+The goal is to preserve behavior while restoring separation of responsibilities.
+
+
+==================================================
+1. INSPECT CURRENT TASK #14 CHANGES FIRST
+==================================================
+
+Inspect:
+
+backend/app/persistence/listing.py
+backend/app/models/listing_price_history.py
+backend/app/persistence/__init__.py
+backend/tests/test_listing_persistence_service.py
+docs/listing-identity-contract-v0.1.md
+
+Also inspect current git diff.
+
+Report:
+
+1. exactly where ListingPriceHistory is currently instantiated;
+2. exactly how price changes are detected;
+3. whether old or new price is stored;
+4. exact ListingPriceHistory ORM fields;
+5. whether recorded_at has a default;
+6. how many flush() calls occur on price change;
+7. whether ListingPersistenceService imports ListingPriceHistory;
+8. exact files modified by Task #14.
+
+Do not make changes before inspection.
+
+
+==================================================
+2. REQUIRED ARCHITECTURE
+==================================================
+
+ListingPersistenceService owns:
+
+- Listing hard identity;
+- Listing creation/reuse;
+- Property consistency;
+- current marketplace state;
+- current asking price;
+- current asking price per sqm;
+- URL;
+- listed_at;
+- duplicate_of_id preservation.
+
+ListingPersistenceService must NOT own:
+
+- ListingPriceHistory creation;
+- price-history querying;
+- price-history deduplication;
+- historical timestamps.
+
+
+ListingPriceHistoryService owns:
+
+- deciding whether a price history record is required;
+- creating ListingPriceHistory;
+- adding/flushing history;
+- no Listing identity decisions;
+- no Listing mutable-state persistence;
+- no commit/rollback/close.
+
+
+==================================================
+3. CREATE DEDICATED SERVICE
+==================================================
+
+Create:
+
+backend/app/persistence/listing_price_history.py
+
+
+Implement:
+
+class ListingPriceHistoryService:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+Define an API that makes the price transition explicit.
+
+Preferred API:
+
+def record_change(
+    self,
+    *,
+    listing: Listing,
+    previous_price_kopecks: int,
+    new_price_kopecks: int,
+) -> ListingPriceHistory | None:
+    ...
+
+
+If inspection shows the ORM requires additional canonical fields,
+report before inventing them.
+
+
+==================================================
+4. PRICE CHANGE CONTRACT
+==================================================
+
+Behavior:
+
+previous_price_kopecks == new_price_kopecks
+    → return None
+    → no add
+    → no flush
+
+
+previous_price_kopecks != new_price_kopecks
+    → create exactly one ListingPriceHistory row
+    → associate it with listing.id
+    → persist the NEW observed price unless existing schema/docs explicitly
+      define another semantics
+    → add exactly once
+    → flush exactly once
+    → return created history row
+
+
+Do NOT create a history row for initial Listing creation.
+
+Initial Listing price already represents the starting state.
+
+
+==================================================
+5. VALIDATION
+==================================================
+
+Validate:
+
+- listing is a persisted/identified Listing suitable for history linkage;
+- previous_price_kopecks is int, not bool;
+- new_price_kopecks is int, not bool;
+- prices follow any existing positive/non-negative domain rule already present.
+
+Do not invent stricter rules than existing canonical money contract.
+
+If listing.id is required and missing, fail clearly rather than creating invalid
+history.
+
+
+==================================================
+6. REMOVE HISTORY RESPONSIBILITY FROM LISTING SERVICE
+==================================================
+
+Modify:
+
+backend/app/persistence/listing.py
+
+
+Remove:
+
+- ListingPriceHistory import;
+- ListingPriceHistory instantiation;
+- history add;
+- history-specific logic.
+
+
+ListingPersistenceService may still detect/update changed current price.
+
+It must return Listing only.
+
+
+Its responsibility ends after current Listing state is persisted.
+
+
+==================================================
+7. ORCHESTRATION BOUNDARY
+==================================================
+
+Do NOT make ListingPersistenceService call ListingPriceHistoryService.
+
+
+That would preserve the same coupling indirectly.
+
+
+Instead document the intended future orchestration:
+
+previous_price = existing_listing.asking_price
+
+ListingPersistenceService updates current Listing state
+
+ListingPriceHistoryService.record_change(
+    listing=listing_row,
+    previous_price_kopecks=previous_price,
+    new_price_kopecks=normalized["asking_price_kopecks"],
+)
+
+
+However, be careful:
+
+The orchestration layer must capture previous_price BEFORE mutation.
+
+
+Do not implement a broad orchestration layer in this correction task unless one
+already exists and is explicitly in scope.
+
+
+==================================================
+8. IMPORTANT ORDERING CONTRACT
+==================================================
+
+Document explicitly:
+
+For an existing Listing:
+
+1. capture persisted previous asking price;
+2. determine incoming canonical price;
+3. persist/update Listing current state;
+4. record price history if previous != incoming;
+5. caller commits the enclosing transaction.
+
+
+Both operations belong to one caller-owned transaction.
+
+
+If history persistence fails:
+
+the outer orchestration layer must be able to roll back the whole transaction.
+
+
+Neither service commits.
+
+
+==================================================
+9. PUBLIC EXPORT
+==================================================
+
+Modify:
+
+backend/app/persistence/__init__.py
+
+
+Preserve:
+
+BuildingPersistenceService
+PropertyPersistenceService
+ListingPersistenceService
+
+Add:
+
+ListingPriceHistoryService
+
+
+Export ListingPriceHistoryService only if project style exports persistence
+services publicly.
+
+
+==================================================
+10. TESTS — LISTING SERVICE
+==================================================
+
+Restore ListingPersistenceService tests to assert:
+
+- changed current price updates Listing;
+- changed price does NOT instantiate/add ListingPriceHistory;
+- Listing persistence does not import history model;
+- no history side effects.
+
+
+Existing Listing persistence behavior must remain otherwise unchanged.
+
+
+==================================================
+11. TESTS — PRICE HISTORY SERVICE
+==================================================
+
+Create:
+
+backend/tests/test_listing_price_history_service.py
+
+
+Use database-free FakeSession.
+
+
+Required cases:
+
+1. changed price creates one history row;
+2. history references correct Listing;
+3. history stores expected new price;
+4. add called exactly once;
+5. flush called exactly once;
+6. created row returned;
+7. unchanged price returns None;
+8. unchanged price performs no add;
+9. unchanged price performs no flush;
+10. initial Listing creation is not a concern of this service;
+11. input Listing is not mutated;
+12. previous/new price inputs are not modified;
+13. invalid price type fails safely;
+14. bool is rejected as integer price if existing contract does so;
+15. missing required listing identity fails safely;
+16. no commit;
+17. no rollback;
+18. no close.
+
+
+==================================================
+12. TRANSACTION OWNERSHIP
+==================================================
+
+Both:
+
+ListingPersistenceService
+ListingPriceHistoryService
+
+use injected Session only.
+
+
+Neither may call:
+
+commit()
+rollback()
+close()
+
+
+Do not create Session/sessionmaker/engine.
+
+
+==================================================
+13. IMPORT GUARDRAIL
+==================================================
+
+backend/app/persistence/listing.py
+
+must NOT import:
+
+ListingPriceHistory
+listing_price_history service
+
+
+backend/app/persistence/listing_price_history.py
+
+may import:
+
+sqlalchemy.orm.Session
+app.models.listing
+app.models.listing_price_history
+
+
+It must NOT import:
+
+app.matching
+app.resolution
+app.ingestion
+app.repositories
+app.database
+app.normalization
+
+
+unless inspection demonstrates a type-only requirement. Prefer not.
+
+
+==================================================
+14. NO DEDUP
+==================================================
+
+ListingPriceHistoryService must not:
+
+- query duplicate_of_id;
+- set duplicate_of_id;
+- inspect other Listings;
+- infer source duplicates;
+- perform Property matching.
+
+
+==================================================
+15. DOC CONTRACT
+==================================================
+
+Update:
+
+docs/listing-identity-contract-v0.1.md
+
+
+Ensure it states:
+
+ListingPersistenceService:
+    current Listing state only.
+
+ListingPriceHistoryService:
+    historical price-change persistence.
+
+Price history is written only when current asking price changes.
+
+Initial creation does not generate a history row.
+
+Both actions participate in one externally owned transaction.
+
+
+Do not add UI requirements.
+
+
+==================================================
+16. FILE SCOPE
+==================================================
+
+Expected create:
+
+backend/app/persistence/listing_price_history.py
+backend/tests/test_listing_price_history_service.py
+
+
+Expected modify:
+
+backend/app/persistence/listing.py
+backend/app/persistence/__init__.py
+backend/tests/test_listing_persistence_service.py
+docs/listing-identity-contract-v0.1.md
+
+
+Do NOT modify:
+
+backend/app/models/*
+backend/app/matching/*
+backend/app/resolution/*
+backend/app/normalization/*
+backend/app/ingestion/*
+backend/app/repositories/*
+backend/scripts/*
+alembic/*
+frontend/*
+dependencies
+
+
+If model/schema changes appear necessary:
+
+STOP and report.
+
+
+==================================================
+17. VALIDATION
+==================================================
+
+Run focused tests:
+
+pytest \
+    tests/test_listing_price_history_service.py \
+    tests/test_listing_persistence_service.py \
+    tests/test_property_persistence_service.py \
+    -q
+
+
+Then run the existing backend regression suite.
+
+
+Expected:
+
+all tests pass.
+
+
+Then:
+
+git diff --check
+
+
+Schema guardrail:
+
+git diff -- backend/app/models alembic
+
+
+Expected:
+
+no changes.
+
+
+==================================================
+18. FINAL REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+2. exact problem found in Task #14 architecture;
+3. exact ListingPriceHistory ORM schema;
+4. final ListingPriceHistoryService API;
+5. price-change behavior;
+6. unchanged-price behavior;
+7. initial-create behavior;
+8. ordering/orchestration contract;
+9. ListingPersistenceService responsibilities after correction;
+10. transaction ownership;
+11. exact files created/modified;
+12. complete contents of listing_price_history.py;
+13. relevant final contents/diff of listing.py;
+14. complete new test file;
+15. updated persistence exports;
+16. documentation change;
+17. focused pytest result;
+18. full regression result;
+19. git diff --check result;
+20. schema guardrail result;
+21. import/transaction guardrail result;
+22. git status --short.
+
+Do not commit.
+
+Stop after reporting.
