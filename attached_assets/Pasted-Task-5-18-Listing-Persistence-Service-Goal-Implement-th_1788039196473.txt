@@ -1,0 +1,1455 @@
+Task #5.18 — Listing Persistence Service
+
+Goal:
+Implement the ORM-aware persistence boundary for Listing identity and mutable
+marketplace state according to:
+
+docs/listing-identity-contract-v0.1.md
+
+The service must enforce:
+
+(source_id, external_id) = hard Listing identity
+
+and must:
+
+1. create a Listing when this source identity does not exist;
+2. reuse the existing Listing when it already exists;
+3. never create a second Listing for the same source_id + external_id;
+4. fail closed if an existing Listing is associated with another Property;
+5. preserve duplicate_of_id;
+6. never perform cross-source deduplication;
+7. never create ListingPriceHistory;
+8. never own the transaction.
+
+This task implements Listing persistence only.
+
+Do NOT implement price-history behavior yet.
+Do NOT implement deduplication yet.
+Do NOT change schema or migrations.
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before modifying anything, inspect:
+
+docs/listing-identity-contract-v0.1.md
+
+backend/app/models/listing.py
+backend/app/models/source.py
+backend/app/models/property.py
+backend/app/models/listing_price_history.py
+backend/app/models/raw_listing.py
+
+backend/app/persistence/building.py
+backend/app/persistence/property.py
+backend/app/persistence/__init__.py
+
+backend/app/normalization/types.py
+
+backend/scripts/seed.py
+
+backend/tests/test_property_persistence_service.py
+backend/tests/test_building_persistence_service.py
+
+alembic/versions/20260822_0925_a153db291edf_create_initial_database_schema.py
+
+
+Report before modifying:
+
+1. exact Listing ORM fields;
+2. exact required/non-null Listing fields;
+3. exact mutable fields;
+4. exact source/external identity constraint;
+5. exact duplicate_of_id FK behavior;
+6. exact money field names and units;
+7. exact status/default behavior;
+8. exact listed_at behavior;
+9. whether a last-seen field exists;
+10. exact Source and Property lookup requirements;
+11. whether Listing persistence already exists;
+12. current persistence exports;
+13. whether every required Listing field can be mapped from the proposed inputs;
+14. whether inspection reveals any schema blocker.
+
+Do not modify anything before inspection.
+
+If a required Listing field cannot be populated from canonical inputs without
+inventing data:
+
+STOP and report instead of guessing.
+
+
+==================================================
+2. CONTRACT SOURCE OF TRUTH
+==================================================
+
+Use:
+
+docs/listing-identity-contract-v0.1.md
+
+as the identity contract.
+
+Hard identity:
+
+(source_id, external_id)
+
+
+Meaning:
+
+same source_id + same external_id
+    → same Listing row
+
+Different external_id
+    → different Listing identity
+
+Different source_id
+    → different Listing identity
+
+
+Do NOT use:
+
+property_id
+source_url
+price
+address
+
+as Listing identity.
+
+
+==================================================
+3. CREATE SERVICE
+==================================================
+
+Create:
+
+backend/app/persistence/listing.py
+
+
+Implement:
+
+class ListingPersistenceService
+
+
+Constructor:
+
+def __init__(
+    self,
+    session: Session,
+) -> None:
+    self._session = session
+
+
+Method:
+
+def persist(
+    self,
+    *,
+    source_key: str,
+    property_key: str,
+    listing: NormalizedListing,
+) -> Listing:
+    ...
+
+
+Use string application keys for consistency with existing:
+
+BuildingPersistenceService
+PropertyPersistenceService
+
+Parse them to UUID only inside persistence.
+
+
+==================================================
+4. INPUT RESPONSIBILITIES
+==================================================
+
+Inputs:
+
+source_key:
+    Source UUID represented as application string
+
+property_key:
+    Property UUID represented as application string
+
+listing:
+    canonical NormalizedListing
+
+
+The service may:
+
+- validate UUID strings;
+- load Source;
+- load Property;
+- query Listing by source_id + external_id;
+- create Listing;
+- update allowed mutable Listing fields;
+- add;
+- flush.
+
+
+It must NOT:
+
+- normalize raw source data;
+- perform building/property matching;
+- perform property resolution;
+- perform cross-source deduplication;
+- modify duplicate_of_id;
+- create ListingPriceHistory;
+- persist RawListing;
+- commit;
+- rollback;
+- close session.
+
+
+==================================================
+5. KEY VALIDATION
+==================================================
+
+Validate source_key:
+
+- str;
+- non-empty after strip;
+- valid UUID.
+
+Invalid source_key:
+
+raise ValueError containing:
+
+source_key
+
+
+Validate property_key:
+
+- str;
+- non-empty after strip;
+- valid UUID.
+
+Invalid property_key:
+
+raise ValueError containing:
+
+property_key
+
+
+Do not query Session for an invalid key.
+
+
+==================================================
+6. SOURCE EXISTENCE
+==================================================
+
+Load:
+
+source = self._session.get(Source, source_id)
+
+
+If absent:
+
+raise ValueError containing:
+
+source_key
+
+
+Do NOT create Source here.
+
+
+==================================================
+7. PROPERTY EXISTENCE
+==================================================
+
+Load:
+
+property_row = self._session.get(Property, property_id)
+
+
+If absent:
+
+raise ValueError containing:
+
+property_key
+
+
+Do NOT create Property here.
+
+
+==================================================
+8. EXTERNAL ID
+==================================================
+
+Use:
+
+listing["external_id"]
+
+
+It must already be canonical, but persistence must fail safely if it is not a
+non-empty string.
+
+Raise ValueError containing:
+
+external_id
+
+
+Do not mutate or normalize the value.
+
+Do not assume numeric.
+
+Do not strip/change the persisted value after validation.
+
+
+==================================================
+9. EXISTING LISTING LOOKUP
+==================================================
+
+Query Listing using exactly:
+
+Listing.source_id == source_id
+Listing.external_id == listing["external_id"]
+
+
+Do not include:
+
+property_id
+price
+URL
+status
+
+in the identity lookup.
+
+
+Expected conceptually:
+
+select(Listing).where(
+    Listing.source_id == source_id,
+    Listing.external_id == listing["external_id"],
+)
+
+
+Use:
+
+scalar_one_or_none()
+
+or the existing project-equivalent idiom.
+
+
+The database already has:
+
+UNIQUE(source_id, external_id)
+
+
+Do NOT add another uniqueness mechanism.
+
+
+==================================================
+10. CREATE CASE
+==================================================
+
+If no existing Listing is found:
+
+create exactly one Listing.
+
+
+Map required canonical fields based on actual ORM inspection.
+
+Expected mapping conceptually:
+
+Listing(
+    source_id=source_id,
+    property_id=property_id,
+    external_id=listing["external_id"],
+    url=listing["source_url"],
+    asking_price=listing["asking_price_kopecks"],
+    asking_price_per_sqm=listing["asking_price_per_sqm_kopecks"],
+    status=<existing model/default-compatible value>,
+    listed_at=listing["listed_at"],
+    duplicate_of_id=None,
+    ...
+)
+
+
+IMPORTANT:
+
+Use exact actual model field names.
+
+Do NOT invent columns.
+
+
+==================================================
+11. MONEY CONTRACT
+==================================================
+
+Canonical application money:
+
+listing["asking_price_kopecks"]
+listing["asking_price_per_sqm_kopecks"]
+
+
+These are integer kopecks.
+
+
+Confirm Listing ORM fields are BIGINT/kopecks from inspection.
+
+Map canonical values directly.
+
+Do NOT:
+
+- divide by 100;
+- multiply by 100;
+- convert to float;
+- recalculate price/m².
+
+
+==================================================
+12. CREATE DUPLICATE STATE
+==================================================
+
+New ordinary Listing must be created with:
+
+duplicate_of_id=None
+
+
+Do not infer duplication.
+
+
+Even if:
+
+- Property already has another Listing;
+- same price exists;
+- another source has similar Listing;
+- address and area match.
+
+
+Cross-source duplicate classification belongs to Task #5.20.
+
+
+==================================================
+13. STATUS ON CREATE
+==================================================
+
+Inspect actual Listing.status definition.
+
+If model has a server/Python default suitable for newly collected listings,
+prefer using that existing contract.
+
+If status must be passed explicitly and current project contract establishes
+"active", use:
+
+status="active"
+
+
+Do NOT invent a new status vocabulary.
+
+Report exact decision.
+
+
+==================================================
+14. LISTED_AT ON CREATE
+==================================================
+
+Map:
+
+listing["listed_at"]
+
+according to actual nullable/default model behavior.
+
+
+listed_at means source-reported publication timestamp.
+
+
+If canonical value is None and ORM allows NULL:
+
+persist None.
+
+
+Do not replace missing listed_at with now().
+
+
+==================================================
+15. LOCATION AND BUILDING-DERIVED DATA
+==================================================
+
+Inspect Listing model carefully.
+
+
+If Listing contains location/geographic or other fields that can be populated
+directly from canonical NormalizedListing, report them.
+
+
+Do NOT introduce PostGIS conversion in this task unless:
+
+- the existing model requires it;
+- an established tested project pattern already exists.
+
+
+If location is nullable, prefer leaving it None rather than introducing an
+untested spatial write path.
+
+
+Do not invent geospatial behavior.
+
+
+==================================================
+16. REUSE CASE
+==================================================
+
+If Listing already exists for:
+
+source_id + external_id
+
+
+Then:
+
+reuse the same ORM Listing row.
+
+
+Do NOT create a second Listing.
+
+
+Return the same ORM object after applying permitted mutable state updates.
+
+
+==================================================
+17. PROPERTY CONSISTENCY GUARD
+==================================================
+
+For existing Listing:
+
+if:
+
+existing.property_id != property_id
+
+
+raise ValueError.
+
+
+Error must clearly contain:
+
+external_id
+property_key
+
+
+Conceptually:
+
+"Existing Listing for external_id=... belongs to another Property; property_key=..."
+
+
+Do NOT silently reassign:
+
+existing.property_id = property_id
+
+
+This is a hard consistency guardrail.
+
+
+==================================================
+18. SOURCE IDENTITY IMMUTABILITY
+==================================================
+
+Never change:
+
+existing.source_id
+
+
+The row was found by that source identity.
+
+
+==================================================
+19. EXTERNAL ID IMMUTABILITY
+==================================================
+
+Never change:
+
+existing.external_id
+
+
+Same-source identity reuse preserves it.
+
+
+==================================================
+20. DUPLICATE_OF_ID PRESERVATION
+==================================================
+
+For an existing Listing:
+
+preserve:
+
+existing.duplicate_of_id
+
+
+Ordinary Listing persistence must never:
+
+- set it;
+- clear it;
+- replace it.
+
+
+Do not derive duplication from Property identity.
+
+
+==================================================
+21. MUTABLE FIELD CLASSIFICATION
+==================================================
+
+Use the contract document plus actual model inspection.
+
+Update only mutable marketplace state supported by canonical data.
+
+
+Expected candidates include actual equivalents of:
+
+url
+asking_price
+asking_price_per_sqm
+status
+listed_at
+
+
+But follow these specific rules below.
+
+
+==================================================
+22. URL UPDATE
+==================================================
+
+If Listing has a URL field:
+
+source URL is mutable metadata.
+
+
+Set it from:
+
+listing["source_url"]
+
+
+for both create and reuse.
+
+
+It is NOT identity.
+
+
+If canonical URL is None and existing URL is non-null:
+
+inspect contract/model intent.
+
+Preferred MVP behavior:
+
+do not destroy a known existing URL merely because a later source observation
+omits it.
+
+
+Therefore:
+
+on reuse:
+    update URL only when listing["source_url"] is not None.
+
+on create:
+    persist canonical value, including None if nullable.
+
+
+Document exact behavior.
+
+
+==================================================
+23. CURRENT PRICE UPDATE
+==================================================
+
+On reuse:
+
+if canonical asking price differs from persisted current asking price:
+
+update Listing current price.
+
+
+Also update current price/m² from canonical normalized data.
+
+
+Do NOT create ListingPriceHistory here.
+
+
+Task #5.19 will own price history.
+
+
+This means Task #5.18 updates current state only.
+
+
+==================================================
+24. PRICE PER SQM COHERENCE
+==================================================
+
+Whenever asking price current state is updated, ensure the canonical
+asking_price_per_sqm field is updated from:
+
+listing["asking_price_per_sqm_kopecks"]
+
+
+Do not calculate it in persistence.
+
+
+Even if asking price is unchanged, if the persisted price/m² differs from
+canonical normalized state, update it.
+
+
+Do not infer why it differs.
+
+
+==================================================
+25. STATUS UPDATE ON REOBSERVATION
+==================================================
+
+NormalizedListing currently may or may not contain canonical status.
+
+Inspect actual NormalizedListing contract.
+
+
+If canonical NormalizedListing has no status:
+
+DO NOT invent status updates in persistence.
+
+
+In that case:
+
+- create using existing model/default status;
+- preserve existing status on reuse.
+
+
+Do not derive "active" merely from observation unless existing architecture
+already explicitly establishes this behavior.
+
+
+Report this clearly.
+
+
+==================================================
+26. LISTED_AT UPDATE ON REUSE
+==================================================
+
+listed_at represents original source publication time.
+
+
+Preferred behavior:
+
+- create: map canonical listed_at;
+- reuse:
+    - if existing.listed_at is None and canonical listed_at is not None:
+          populate it;
+    - otherwise preserve existing listed_at.
+
+
+Do NOT overwrite an existing publication timestamp on each reobservation.
+
+
+If project docs specify a different rule, follow the docs and report it.
+
+
+==================================================
+27. LAST SEEN
+==================================================
+
+If Listing has no last_seen field:
+
+do not simulate it using updated_at.
+
+
+Do not add a schema field.
+
+
+Report:
+
+"last-seen observation tracking remains technical debt"
+
+
+if confirmed by inspection.
+
+
+==================================================
+28. FLUSH BEHAVIOR
+==================================================
+
+CREATE:
+
+self._session.add(listing_row)
+self._session.flush()
+
+
+REUSE:
+
+If mutable state is changed:
+
+self._session.flush()
+
+
+If nothing changes:
+
+prefer no flush.
+
+
+Implement a simple explicit:
+
+changed = False
+
+
+rather than sophisticated ORM dirty-state introspection.
+
+
+Do not commit.
+
+
+==================================================
+29. CREATE RACE CONDITION
+==================================================
+
+The database already enforces:
+
+UNIQUE(source_id, external_id)
+
+
+Do NOT add exception/retry complexity unless existing architecture already has
+a clear transaction/concurrency policy.
+
+
+Document:
+
+Concurrent create races remain protected by DB uniqueness, but a production
+orchestration layer may later need IntegrityError retry/reload handling.
+
+
+Do NOT implement retry behavior in this task.
+
+
+==================================================
+30. RETURN CONTRACT
+==================================================
+
+persist(...) -> Listing
+
+
+CREATE:
+    returns newly created/flushed Listing.
+
+
+REUSE:
+    returns exact existing Listing object.
+
+
+ERROR:
+    raises ValueError for invalid/missing source/property or property conflict.
+
+
+==================================================
+31. SESSION OWNERSHIP
+==================================================
+
+Injected Session only.
+
+
+Do NOT instantiate:
+
+Session
+sessionmaker
+engine
+
+
+Do NOT call:
+
+commit()
+rollback()
+close()
+
+
+Transaction belongs to caller.
+
+
+==================================================
+32. PUBLIC EXPORT
+==================================================
+
+Modify:
+
+backend/app/persistence/__init__.py
+
+
+Preserve existing exports.
+
+
+Add:
+
+ListingPersistenceService
+
+
+==================================================
+33. TEST FILE
+==================================================
+
+Create:
+
+backend/tests/test_listing_persistence_service.py
+
+
+Prefer database-free unit tests with a recording FakeSession.
+
+
+FakeSession must support:
+
+session.get(Source, ...)
+session.get(Property, ...)
+session.execute(...) or scalars/scalar equivalent required by implementation
+session.add(...)
+session.flush(...)
+
+
+Track:
+
+get calls
+listing lookup calls
+added objects
+flush calls
+commit calls
+rollback calls
+close calls
+
+
+Do not use live PostgreSQL.
+
+
+==================================================
+34. TEST FIXTURES
+==================================================
+
+Use deterministic UUIDs or uuid4.
+
+
+Provide:
+
+Source
+Property
+Listing fixtures
+
+
+Canonical listing fixture must conform to current NormalizedListing:
+
+external_id
+address
+area_sqm
+rooms
+is_studio
+floor
+total_floors
+asking_price_kopecks
+asking_price_per_sqm_kopecks
+city
+latitude
+longitude
+source_url
+building_type
+listed_at
+
+
+==================================================
+35. REQUIRED CREATE TESTS
+==================================================
+
+TEST 1
+No existing Listing → creates one Listing.
+
+
+TEST 2
+Created Listing uses correct:
+
+source_id
+property_id
+external_id
+
+
+TEST 3
+Created money values map directly in kopecks.
+
+
+TEST 4
+New Listing has duplicate_of_id=None.
+
+
+TEST 5
+source_url maps correctly on create.
+
+
+TEST 6
+listed_at maps according to nullable contract.
+
+
+TEST 7
+add called exactly once.
+
+
+TEST 8
+flush called exactly once.
+
+
+TEST 9
+created Listing returned.
+
+
+==================================================
+36. REQUIRED REUSE IDENTITY TESTS
+==================================================
+
+TEST 10
+Same source + same external_id → existing Listing reused.
+
+
+TEST 11
+Reuse returns exact same ORM object.
+
+
+TEST 12
+Reuse performs no add.
+
+
+TEST 13
+Lookup identity uses only:
+
+source_id + external_id
+
+
+It must not require property_id to locate the Listing.
+
+
+==================================================
+37. PROPERTY CONFLICT TESTS
+==================================================
+
+TEST 14
+Existing Listing associated with requested Property succeeds.
+
+
+TEST 15
+Existing Listing associated with another Property raises ValueError.
+
+
+TEST 16
+Property conflict performs no add.
+
+
+TEST 17
+Property conflict does not mutate existing Listing.
+
+
+TEST 18
+Property conflict preserves original property_id.
+
+
+==================================================
+38. EXTERNAL/SOURCE IDENTITY TESTS
+==================================================
+
+TEST 19
+Same external_id under a different source is not returned as same identity.
+
+
+This can be tested through fake lookup behavior.
+
+
+TEST 20
+Existing source_id is never modified.
+
+
+TEST 21
+Existing external_id is never modified.
+
+
+==================================================
+39. MUTABLE STATE TESTS
+==================================================
+
+TEST 22
+Changed asking price updates existing Listing current price.
+
+
+TEST 23
+Changed price/m² updates existing current price/m².
+
+
+TEST 24
+Price change does NOT create a new Listing.
+
+
+TEST 25
+Price change does NOT create ListingPriceHistory.
+
+
+TEST 26
+Changed non-null source URL updates existing URL.
+
+
+TEST 27
+Missing incoming URL does not erase known existing URL.
+
+
+TEST 28
+Existing duplicate_of_id is preserved during reuse.
+
+
+TEST 29
+Existing duplicate_of_id is preserved during price update.
+
+
+==================================================
+40. LISTED_AT TESTS
+==================================================
+
+TEST 30
+Existing listed_at is preserved when incoming listed_at differs.
+
+
+TEST 31
+Missing existing listed_at may be filled from non-null canonical listed_at.
+
+
+TEST 32
+Incoming listed_at=None does not erase existing listed_at.
+
+
+==================================================
+41. NO-CHANGE REUSE
+==================================================
+
+TEST 33
+If existing mutable state already matches canonical listing:
+
+- same object returned;
+- no add;
+- no flush.
+
+
+==================================================
+42. INPUT VALIDATION TESTS
+==================================================
+
+TEST 34
+blank source_key rejected before session lookup.
+
+
+TEST 35
+malformed source_key rejected before session lookup.
+
+
+TEST 36
+blank property_key rejected before session lookup.
+
+
+TEST 37
+malformed property_key rejected before session lookup.
+
+
+TEST 38
+missing Source rejected without writes.
+
+
+TEST 39
+missing Property rejected without writes.
+
+
+TEST 40
+blank external_id rejected without Listing lookup/write.
+
+
+==================================================
+43. INPUT IMMUTABILITY
+==================================================
+
+TEST 41
+NormalizedListing input is not mutated.
+
+
+==================================================
+44. TRANSACTION TESTS
+==================================================
+
+For create, reuse, no-change reuse, and error paths verify:
+
+commit_calls == 0
+rollback_calls == 0
+close_calls == 0
+
+
+==================================================
+45. ARCHITECTURAL GUARDRAILS
+==================================================
+
+backend/app/persistence/listing.py MAY import:
+
+sqlalchemy
+sqlalchemy.orm.Session
+
+app.models.listing
+app.models.source
+app.models.property
+app.normalization.types
+
+
+It must NOT import:
+
+app.matching
+app.resolution
+app.repositories
+app.ingestion
+app.database
+
+
+It must NOT import or use:
+
+ListingPriceHistory
+
+unless only a TYPE_CHECKING/doc reference is absolutely necessary.
+
+Preferred:
+
+do not import ListingPriceHistory at all.
+
+
+It must not contain:
+
+.commit(
+.rollback(
+.close(
+
+
+It must not modify:
+
+duplicate_of_id
+
+
+except assigning None on creation.
+
+
+==================================================
+46. NO DEDUP LOGIC
+==================================================
+
+Search the new service and confirm it does NOT:
+
+- query Listings by property_id to determine identity;
+- compare one Listing with other source Listings;
+- assign duplicate_of_id to an existing Listing;
+- infer canonical/duplicate status.
+
+
+==================================================
+47. NO PRICE HISTORY LOGIC
+==================================================
+
+Confirm the new service does NOT:
+
+- instantiate ListingPriceHistory;
+- add a price history row;
+- query price history;
+- call a history service.
+
+
+Task #5.19 will own that behavior.
+
+
+==================================================
+48. FILE SCOPE
+==================================================
+
+Create only:
+
+backend/app/persistence/listing.py
+backend/tests/test_listing_persistence_service.py
+
+
+Modify only:
+
+backend/app/persistence/__init__.py
+
+
+Do NOT modify:
+
+backend/app/models/*
+backend/app/matching/*
+backend/app/resolution/*
+backend/app/normalization/*
+backend/app/ingestion/*
+backend/app/repositories/*
+backend/scripts/*
+alembic/*
+docs/*
+frontend/*
+requirements/dependencies
+
+
+If inspection reveals a schema or contract blocker:
+
+STOP and report.
+
+
+==================================================
+49. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_listing_persistence_service.py \
+    tests/test_property_persistence_service.py \
+    tests/test_property_resolution_service.py \
+    tests/test_conservative_property_matcher.py \
+    tests/test_property_matcher_contract.py \
+    tests/test_sqlalchemy_property_candidate_provider.py \
+    tests/test_building_persistence_service.py \
+    tests/test_building_resolution_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalizer_interface.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then:
+
+git diff --check
+
+
+==================================================
+50. SCHEMA GUARDRAIL
+==================================================
+
+Run:
+
+git diff -- backend/app/models alembic
+
+
+Expected:
+
+no changes.
+
+
+==================================================
+51. IMPORT GUARDRAIL
+==================================================
+
+Confirm:
+
+backend/app/persistence/listing.py
+
+does NOT import:
+
+app.matching
+app.resolution
+app.repositories
+app.ingestion
+app.database
+
+
+Confirm it does not import:
+
+ListingPriceHistory
+
+
+==================================================
+52. TRANSACTION GUARDRAIL
+==================================================
+
+Confirm source does not contain:
+
+.commit(
+.rollback(
+.close(
+
+
+==================================================
+53. DEDUP GUARDRAIL
+==================================================
+
+Confirm existing Listing duplicate_of_id is never reassigned.
+
+New Listing may explicitly use:
+
+duplicate_of_id=None
+
+
+No other duplicate assignment is allowed.
+
+
+==================================================
+54. PRICE HISTORY GUARDRAIL
+==================================================
+
+Confirm:
+
+ListingPriceHistory
+
+is not instantiated, queried, or persisted.
+
+
+==================================================
+55. REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+
+2. exact Listing schema relevant to persistence;
+
+3. exact source listing identity rule confirmed;
+
+4. exact ListingPersistenceService API;
+
+5. create behavior;
+
+6. reuse behavior;
+
+7. property conflict behavior;
+
+8. money mapping;
+
+9. URL update behavior;
+
+10. status behavior;
+
+11. listed_at behavior;
+
+12. duplicate_of_id behavior;
+
+13. flush behavior;
+
+14. transaction ownership;
+
+15. concurrency note regarding DB UNIQUE(source_id, external_id);
+
+16. files created/modified;
+
+17. complete contents of:
+    backend/app/persistence/listing.py
+
+18. complete updated contents of:
+    backend/app/persistence/__init__.py
+
+19. complete contents of:
+    backend/tests/test_listing_persistence_service.py
+
+20. pytest result;
+
+21. git diff --check result;
+
+22. schema guardrail result;
+
+23. import guardrail result;
+
+24. transaction guardrail result;
+
+25. dedup guardrail result;
+
+26. price-history guardrail result;
+
+27. git status --short.
+
+Do not commit.
+
+Stop after reporting.
