@@ -4,8 +4,83 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy.orm import Session
+
 from app.collector.base import Collector
+from app.models.listing import Listing
+from app.normalization.types import NormalizedListing
+from app.persistence import ListingPersistenceService, ListingPriceHistoryService
 from app.repositories.raw_listing import RawListingRepository
+
+
+class ListingPersistenceOrchestrator:
+    """Join current Listing and price-history writes in one caller transaction."""
+
+    def __init__(
+        self,
+        listing_persistence: ListingPersistenceService,
+        price_history: ListingPriceHistoryService,
+    ) -> None:
+        self._listing_persistence = listing_persistence
+        self._price_history = price_history
+
+    @classmethod
+    def from_session(cls, session: Session) -> ListingPersistenceOrchestrator:
+        """Build both persistence services on one caller-owned Session."""
+        return cls(
+            ListingPersistenceService(session),
+            ListingPriceHistoryService(session),
+        )
+
+    def persist(
+        self,
+        *,
+        source_key: str,
+        property_key: str,
+        listing: NormalizedListing,
+    ) -> Listing:
+        """Persist one normalized Listing and its price transition.
+
+        The injected persistence services must share the caller's Session.  This
+        method deliberately does not commit, roll back, or close that session.
+        """
+        existing = self._listing_persistence.find_existing(
+            source_key=source_key,
+            external_id=listing.get("external_id"),
+        )
+        previous_price = existing.asking_price if existing is not None else None
+        new_price = listing["asking_price_kopecks"]
+
+        persisted_listing = self._listing_persistence.persist(
+            source_key=source_key,
+            property_key=property_key,
+            listing=listing,
+        )
+
+        if existing is not None and previous_price != new_price:
+            if previous_price is None:
+                raise ValueError("existing Listing must have an asking price")
+            self._price_history.record_change(
+                listing=persisted_listing,
+                previous_price_kopecks=previous_price,
+                new_price_kopecks=new_price,
+            )
+
+        return persisted_listing
+
+    def persist_listing(
+        self,
+        *,
+        source_key: str,
+        property_key: str,
+        listing: NormalizedListing,
+    ) -> Listing:
+        """Descriptive alias for callers that expose a listing pipeline step."""
+        return self.persist(
+            source_key=source_key,
+            property_key=property_key,
+            listing=listing,
+        )
 
 
 class IngestionService:

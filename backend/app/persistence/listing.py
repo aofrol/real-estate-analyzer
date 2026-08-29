@@ -29,9 +29,7 @@ class ListingPersistenceService:
         """Persist a normalized Listing identified by its source identity."""
         source_id = self._parse_uuid(source_key, field_name="source_key")
         property_id = self._parse_uuid(property_key, field_name="property_key")
-        external_id = listing.get("external_id")
-        if not isinstance(external_id, str) or not external_id.strip():
-            raise ValueError("external_id must be a non-empty string")
+        external_id = self._validate_external_id(listing.get("external_id"))
 
         source = self._session.get(Source, source_id)
         if source is None:
@@ -64,6 +62,20 @@ class ListingPersistenceService:
             self._session.flush()
 
         return existing
+
+    def find_existing(
+        self,
+        *,
+        source_key: str,
+        external_id: object,
+    ) -> Listing | None:
+        """Find a Listing by source identity without mutating the session."""
+        source_id = self._parse_uuid(source_key, field_name="source_key")
+        external_id = self._validate_external_id(external_id)
+        return self._find_by_source_identity(
+            source_id=source_id,
+            external_id=external_id,
+        )
 
     def _find_by_source_identity(
         self,
@@ -137,3 +149,9 @@ class ListingPersistenceService:
             return UUID(value)
         except (AttributeError, TypeError, ValueError):
             raise ValueError(f"{field_name} must be a valid UUID") from None
+
+    @staticmethod
+    def _validate_external_id(value: object) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("external_id must be a non-empty string")
+        return value

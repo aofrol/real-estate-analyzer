@@ -794,6 +794,24 @@ Property consistency, current prices, URL, `listed_at` и
 Если history persistence завершается ошибкой, внешний orchestration может
 откатить всю транзакцию.
 
+Фактическая application boundary — `ListingPersistenceOrchestrator` в ingestion
+layer. Она:
+
+- вызывает `ListingPersistenceService.find_existing()` до любой мутации;
+- захватывает `existing.asking_price` и incoming canonical price;
+- вызывает `ListingPersistenceService.persist()` для current state;
+- вызывает `ListingPriceHistoryService.record_change()` только для
+  существующего Listing с изменившейся ценой;
+- не вызывает `commit()`, `rollback()` или `close()`.
+
+Worker-facing boundary `persist_refreshed_listing()` принимает caller-owned
+`Session` и строит оба persistence-сервиса на ней через
+`ListingPersistenceOrchestrator.from_session()`. Запланированная Celery-задача
+пока остаётся stub до появления выборки locations, но индивидуальная normalized
+Listing write boundary уже не позволяет обойти общий orchestration-поток.
+Ошибка history persistence не перехватывается внутренними сервисами и может
+откатить всю caller-owned transaction.
+
 ## 25. Future Task #5.20 Dedup boundary
 
 Cross-source deduplication должна быть отдельной цепочкой:
@@ -882,13 +900,11 @@ source omits them or sends `NULL`.
 
 This document does not:
 
-- implement Listing persistence;
 - add or change ORM models;
 - add Alembic migrations;
 - modify database schema;
 - implement Listing deduplication;
 - assign `duplicate_of_id`;
-- write ListingPriceHistory rows;
 - change RawListing ingestion behavior;
 - add `last_seen_at`;
 - change `status` into an enum;

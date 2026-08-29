@@ -170,6 +170,18 @@ Service:
 Service не создаёт ORM-объекты, не работает с SQLAlchemy session,
 не нормализует и не дедуплицирует объявления.
 
+Для normalized persistence ingestion layer отдельно предоставляет
+`ListingPersistenceOrchestrator`. Он не меняет raw-ingestion контракт:
+
+1. находит существующий Listing и захватывает его текущую цену;
+2. сохраняет current Listing state;
+3. записывает новую цену в history только при изменении существующего Listing;
+4. оставляет transaction lifecycle внешнему caller.
+
+Worker-facing `persist_refreshed_listing()` использует эту boundary и связывает
+оба persistence-сервиса с одной caller-owned Session. Сама scheduled
+`refresh_recent_locations()` пока остаётся stub до реализации выборки locations.
+
 ---
 
 ## 8. Normalization Strategy
@@ -246,6 +258,8 @@ MVP identity matching основан на:
 - `RawListingRepository`;
 - `SQLAlchemyRawListingRepository`;
 - `IngestionService`;
+- `ListingPersistenceOrchestrator`;
+- worker-facing normalized Listing persistence boundary;
 - ingestion pipeline tests.
 
 ### Planned
