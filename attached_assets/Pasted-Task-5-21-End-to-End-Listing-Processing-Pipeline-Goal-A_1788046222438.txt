@@ -1,0 +1,622 @@
+Task #5.21 — End-to-End Listing Processing Pipeline
+
+Goal
+
+Assemble the already implemented ingestion / normalization / building / property / listing / price-history components into one application-level processing pipeline for a single source listing observation.
+
+This task must prove that one raw source observation can move through the complete backend persistence flow, and that a repeated observation of the same source listing reuses the same entities and records price history correctly.
+
+IMPORTANT:
+- This is application orchestration only.
+- Do not redesign existing services.
+- Do not implement Celery scheduling.
+- Do not implement cross-source deduplication.
+- Do not implement frontend/API endpoints.
+- Do not change database schema or Alembic migrations.
+- Do not commit automatically.
+- Inspect the current repository first and adapt exact imports/signatures to the code that actually exists.
+
+--------------------------------------------------
+1. Inspect current architecture first
+--------------------------------------------------
+
+Before editing any files, inspect and report:
+
+1. SourceAdapter / MockAdapter interfaces and actual payload shape.
+2. Collector interface.
+3. IngestionService interface.
+4. RawListingRepository interface and SQLAlchemy implementation.
+5. NormalizationService interface.
+6. MockNormalizer interface.
+7. Building candidate provider / matcher / resolution / persistence services.
+8. Property candidate provider / matcher / resolution / persistence services.
+9. ListingPersistenceService.
+10. ListingPriceHistoryService.
+11. ListingPersistenceOrchestrator from Task #17.
+12. Relevant ORM models:
+   - Source
+   - RawListing
+   - Building
+   - Property
+   - Listing
+   - ListingPriceHistory
+13. Existing transaction ownership conventions.
+14. Existing tests that already combine more than one layer.
+
+Report exact signatures before implementing.
+
+Do not modify code until this inspection is complete.
+
+--------------------------------------------------
+2. Architectural target
+--------------------------------------------------
+
+We want one application service that coordinates a single normalized listing observation through:
+
+External observation
+    ↓
+Normalization
+    ↓
+Building resolution
+    ↓
+Building persistence
+    ↓
+Property resolution
+    ↓
+Property persistence
+    ↓
+Listing current-state persistence
+    ↓
+Listing price-history persistence
+
+Target conceptual flow:
+
+source_id + persisted RawListing
+        ↓
+NormalizationService
+        ↓
+BuildingCandidateProvider
+        ↓
+BuildingMatcher
+        ↓
+BuildingResolutionService
+        ↓
+BuildingPersistenceService
+        ↓
+PropertyCandidateProvider
+        ↓
+PropertyMatcher
+        ↓
+PropertyResolutionService
+        ↓
+PropertyPersistenceService
+        ↓
+ListingPersistenceOrchestrator
+        ↓
+Listing + optional ListingPriceHistory
+
+The caller owns the SQLAlchemy Session and enclosing transaction.
+
+The new pipeline service MUST NOT call:
+- commit()
+- rollback()
+- close()
+
+--------------------------------------------------
+3. Scope clarification: raw ingestion
+--------------------------------------------------
+
+Do NOT redesign RawListing persistence in this task.
+
+The current schema has:
+
+UNIQUE(source_id, external_id)
+
+Therefore RawListing currently behaves as one persisted raw source record per source listing identity, not a true append-only observation journal.
+
+For Task #5.21, the processing pipeline should accept an already persisted RawListing or otherwise reuse the current ingestion boundary exactly as the repository currently supports it.
+
+Do not introduce a second raw-observation history table.
+Do not remove the existing uniqueness constraint.
+Do not change migrations.
+
+If repeated source observation cannot create another RawListing because of the current unique constraint, test repeated processing using the same persisted RawListing with updated/raw fixture input through the narrowest existing supported boundary.
+
+Document this limitation explicitly.
+
+--------------------------------------------------
+4. New application orchestration service
+--------------------------------------------------
+
+Create an application-level service.
+
+Preferred file:
+
+backend/app/processing/listing_pipeline.py
+
+Preferred public class name:
+
+ListingProcessingPipeline
+
+Create package export if needed:
+
+backend/app/processing/__init__.py
+
+Use dependency injection.
+
+Do not instantiate:
+- engine
+- sessionmaker
+- database connection
+- global repositories
+
+inside the service.
+
+Preferred conceptual constructor:
+
+class ListingProcessingPipeline:
+    def __init__(
+        self,
+        *,
+        normalization_service: NormalizationService,
+        building_candidate_provider: ...,
+        building_matcher: ...,
+        building_resolution_service: ...,
+        building_persistence_service: BuildingPersistenceService,
+        property_candidate_provider: ...,
+        property_matcher: ...,
+        property_resolution_service: ...,
+        property_persistence_service: PropertyPersistenceService,
+        listing_persistence_orchestrator: ListingPersistenceOrchestrator,
+    ) -> None:
+        ...
+
+Adapt this to the actual current APIs.
+
+If existing ResolutionService already internally coordinates provider + matcher, inject only the actual required dependencies instead of duplicating layers.
+
+Do not create fake abstractions just to match this prompt.
+
+--------------------------------------------------
+5. Preferred public processing API
+--------------------------------------------------
+
+Use the narrowest domain-correct API supported by current code.
+
+Preferred shape:
+
+def process(
+    self,
+    *,
+    source_key: str,
+    raw_listing: RawListing,
+) -> ListingProcessingResult:
+    ...
+
+or, if the current NormalizationService contract accepts persisted external_id + raw_data rather than RawListing ORM object:
+
+def process(
+    self,
+    *,
+    source_key: str,
+    external_id: str,
+    raw_data: dict[str, object],
+) -> ListingProcessingResult:
+    ...
+
+Choose based on current code.
+
+Do NOT pass source_id from raw external payload.
+
+source identity must come from authoritative orchestration input / persisted Source.
+
+--------------------------------------------------
+6. Processing result
+--------------------------------------------------
+
+Create a small immutable result object if useful.
+
+Preferred:
+
+@dataclass(frozen=True)
+class ListingProcessingResult:
+    normalized_listing: NormalizedListing
+    building: Building
+    property: Property
+    listing: Listing
+    price_history: ListingPriceHistory | None
+
+If exposing ORM entities in a frozen dataclass conflicts with existing project conventions, adapt minimally.
+
+Do not return unrelated infrastructure objects.
+
+--------------------------------------------------
+7. Exact processing semantics
+--------------------------------------------------
+
+For one source observation:
+
+STEP A — Normalize
+
+Normalize using:
+- authoritative persisted external_id;
+- raw_data copy;
+- existing NormalizationService;
+- existing canonical NormalizedListing contract.
+
+Do not mutate raw input.
+
+STEP B — Building
+
+Use existing building candidate/match/resolution logic.
+
+Expected semantics:
+- one exact match → reuse existing Building;
+- no match → create Building;
+- ambiguous → fail closed;
+- no silent arbitrary candidate selection.
+
+Persist using BuildingPersistenceService.
+
+STEP C — Property
+
+Use existing property candidate/match/resolution logic scoped to resolved Building.
+
+Expected semantics:
+- one exact descriptive-signature match → reuse Property;
+- no match → create Property;
+- ambiguous → fail closed.
+
+Persist using PropertyPersistenceService.
+
+STEP D — Listing
+
+Call existing ListingPersistenceOrchestrator using:
+- authoritative Source identity;
+- resolved Property identity;
+- NormalizedListing.
+
+Do not duplicate ListingPersistenceService logic inside the new pipeline.
+
+Do not duplicate ListingPriceHistoryService logic inside the new pipeline.
+
+The existing ListingPersistenceOrchestrator remains responsible for:
+- capturing previous price before current Listing mutation;
+- persisting current Listing state;
+- invoking price-history persistence when appropriate.
+
+STEP E — Return result
+
+Return resolved/persisted:
+- normalized listing;
+- Building;
+- Property;
+- Listing;
+- optional ListingPriceHistory.
+
+--------------------------------------------------
+8. Critical identity behavior
+--------------------------------------------------
+
+The integration tests must prove all of the following.
+
+FIRST OBSERVATION
+
+Given one Mock source listing:
+
+- Building is created.
+- Property is created.
+- Listing is created.
+- Listing identity is source_id + external_id.
+- Listing.duplicate_of_id is NULL.
+- no ListingPriceHistory row is created for initial Listing creation.
+
+SECOND OBSERVATION — SAME IDENTITY / SAME PRICE
+
+Process the same source + external_id again with the same canonical apartment identity and same price.
+
+Must prove:
+
+- same Building row reused;
+- same Property row reused;
+- same Listing row reused;
+- no second Listing created;
+- no price history created;
+- no property reassignment;
+- no duplicate_of_id mutation.
+
+THIRD OBSERVATION — SAME IDENTITY / CHANGED PRICE
+
+Process same source + external_id again, same apartment, but changed asking price.
+
+Must prove:
+
+- same Building reused;
+- same Property reused;
+- same Listing reused;
+- Listing current asking_price becomes new price;
+- Listing current asking_price_per_sqm becomes the new canonical value;
+- exactly one ListingPriceHistory row is created;
+- history row points to same Listing;
+- history row contains the NEW observed price;
+- no history row is created with old price;
+- stable Listing.id remains unchanged.
+
+OPTIONAL FOURTH OBSERVATION
+
+If straightforward, process changed URL with same identity:
+
+- Listing identity remains unchanged;
+- non-null incoming URL updates current URL;
+- incoming None does not erase existing URL.
+
+Do not expand scope if this requires unrelated changes.
+
+--------------------------------------------------
+9. Transaction and rollback integration test
+--------------------------------------------------
+
+Add at least one real SQLAlchemy integration test proving transaction behavior.
+
+Preferred scenario:
+
+- process an observation where Listing current-state persistence succeeds;
+- deliberately force the price-history stage to raise an exception;
+- caller rolls back transaction;
+- verify database does not retain partially updated Listing price/history state.
+
+Do not add commit/rollback inside any service to make the test pass.
+
+The test should prove the architectural contract:
+
+all persistence operations participate in one caller-owned transaction.
+
+If current test infrastructure already provides transaction fixtures, reuse them.
+
+--------------------------------------------------
+10. Ambiguity propagation
+--------------------------------------------------
+
+Add tests proving:
+
+- ambiguous Building resolution propagates an error and does not create Property/Listing;
+- ambiguous Property resolution propagates an error and does not create Listing.
+
+Do not invent fallback tie-breaking.
+
+Fail closed.
+
+--------------------------------------------------
+11. No duplicate responsibilities
+--------------------------------------------------
+
+The new ListingProcessingPipeline MUST NOT:
+
+- query Listing identity directly if ListingPersistenceOrchestrator already owns that behavior;
+- create ListingPriceHistory directly;
+- implement price comparison itself;
+- set duplicate_of_id;
+- perform cross-source deduplication;
+- implement Listing lifecycle/status policy;
+- implement geocoding/network calls;
+- create transactions;
+- commit;
+- rollback;
+- close session;
+- contain Celery code;
+- contain HTTP/FastAPI code.
+
+--------------------------------------------------
+12. Worker-facing boundary
+--------------------------------------------------
+
+Inspect the worker-facing refresh boundary added in Task #17.
+
+Do not implement scheduled refresh.
+
+If the current boundary is a stub, it may call the new ListingProcessingPipeline only if this can be done without introducing Celery scheduling/configuration.
+
+Otherwise leave it unchanged and document how a future worker will invoke the pipeline.
+
+Do not turn Task #5.21 into Task #18.
+
+--------------------------------------------------
+13. Integration test strategy
+--------------------------------------------------
+
+Prefer real SQLAlchemy/PostgreSQL integration tests for this task because the purpose is to prove the persistence chain.
+
+Reuse existing DB test fixtures.
+
+Tests should not require internet access.
+
+Use MockNormalizer / mock source payloads.
+
+Minimum required scenarios:
+
+1. first observation creates Building + Property + Listing, no price history;
+2. repeat same observation reuses all identities and creates no history;
+3. repeat with changed price reuses identities and creates exactly one history row;
+4. ambiguous Building fails closed;
+5. ambiguous Property fails closed;
+6. transaction rollback prevents partial current-state/history persistence;
+7. source/external Listing identity remains stable;
+8. normalized raw input is not mutated.
+
+Do not test internal implementation details unless necessary.
+
+Prefer database-visible behavior.
+
+--------------------------------------------------
+14. Existing RawListing limitation
+--------------------------------------------------
+
+Update architecture documentation with a concise note:
+
+Current MVP raw ingestion identity:
+
+(source_id, external_id)
+
+is unique.
+
+Therefore raw_listings currently stores one raw record per source listing identity rather than an immutable observation log.
+
+Repeated price observations are represented at the normalized Listing current-state + ListingPriceHistory layer.
+
+Future technical debt:
+introduce a dedicated append-only raw observation/version model if historical raw snapshots are required.
+
+Do not change schema in this task.
+
+--------------------------------------------------
+15. Documentation
+--------------------------------------------------
+
+Update the most appropriate existing architecture document, preferably:
+
+docs/data-pipeline-v0.1.md
+
+and, only if directly relevant:
+
+docs/listing-identity-contract-v0.1.md
+
+Document the final application flow:
+
+RawListing
+   ↓
+NormalizationService
+   ↓
+Building resolution/persistence
+   ↓
+Property resolution/persistence
+   ↓
+ListingPersistenceOrchestrator
+      ├── Listing current state
+      └── ListingPriceHistory
+
+Caller owns transaction.
+
+Also explicitly document that:
+- duplicate detection is not part of this pipeline yet;
+- scheduled refresh is not part of this task.
+
+--------------------------------------------------
+16. Expected files
+--------------------------------------------------
+
+Expected new files:
+
+backend/app/processing/__init__.py
+backend/app/processing/listing_pipeline.py
+backend/tests/test_listing_processing_pipeline.py
+
+Expected modified docs:
+
+docs/data-pipeline-v0.1.md
+
+Possibly:
+docs/listing-identity-contract-v0.1.md
+
+Only modify other production files if the current existing APIs make a minimal integration correction strictly necessary.
+
+If you need to modify any of these, stop and explain first:
+
+backend/app/models/*
+alembic/*
+backend/requirements.txt
+docker-compose.yml
+frontend/*
+normalization core contracts
+matching core contracts
+database schema
+
+--------------------------------------------------
+17. Guardrails
+--------------------------------------------------
+
+After implementation run:
+
+git diff --check
+
+Report:
+
+git status --short
+git diff --stat
+git diff --name-only
+
+Schema guardrail:
+
+git diff --name-only -- backend/app/models alembic backend/requirements.txt
+
+Expected: no output.
+
+Search new pipeline for forbidden transaction ownership:
+
+commit(
+rollback(
+close(
+sessionmaker
+create_engine
+
+Expected: none.
+
+Search new pipeline for forbidden responsibilities:
+
+ListingPriceHistory(
+duplicate_of_id =
+Celery
+FastAPI
+
+Expected: none, except harmless type imports where justified.
+
+--------------------------------------------------
+18. Tests
+--------------------------------------------------
+
+Run focused tests for:
+
+- listing processing pipeline
+- ListingPersistenceOrchestrator
+- ListingPersistenceService
+- ListingPriceHistoryService
+- Building persistence/resolution
+- Property persistence/resolution
+- NormalizationService / MockNormalizer
+
+Then run the full backend regression suite.
+
+Report exact pass counts.
+
+--------------------------------------------------
+19. Final review report
+--------------------------------------------------
+
+Before proposing completion, report:
+
+1. exact new pipeline public API;
+2. exact dependencies injected;
+3. exact end-to-end call order;
+4. how authoritative Source identity enters the pipeline;
+5. how external_id enters normalization;
+6. Building reuse/create behavior;
+7. Property reuse/create behavior;
+8. Listing reuse/create behavior;
+9. price-history behavior;
+10. first observation result;
+11. repeated unchanged observation result;
+12. repeated changed-price observation result;
+13. ambiguity behavior;
+14. transaction ownership;
+15. rollback test result;
+16. RawListing uniqueness limitation;
+17. files created;
+18. files modified;
+19. focused test count;
+20. full backend regression count;
+21. git diff --check result;
+22. schema guardrail result;
+23. git status --short.
+
+Do not commit.
+
+Stop after the report and wait for review.
