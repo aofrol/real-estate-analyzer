@@ -8,6 +8,7 @@ from .exact_building import ExactBuildingMatcher
 from .property import PropertyMatchResult, PropertyMatcher
 from .property_candidates import PropertyCandidate, PropertyCandidateProvider
 from .sqlalchemy_candidates import SQLAlchemyBuildingCandidateProvider
+from .sqlalchemy_property_candidates import SQLAlchemyPropertyCandidateProvider
 
 __all__ = [
     "BuildingMatcher",
@@ -22,4 +23,5 @@ __all__ = [
     "PropertyCandidate",
     "PropertyCandidateProvider",
     "ConservativePropertyMatcher",
+    "SQLAlchemyPropertyCandidateProvider",
 ]

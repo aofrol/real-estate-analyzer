@@ -1,0 +1,808 @@
+Task #5.13 — SQLAlchemyPropertyCandidateProvider
+
+Goal:
+Implement a SQLAlchemy-backed PropertyCandidateProvider that loads Property
+rows for one already-resolved Building and maps them into framework-independent
+PropertyCandidate objects.
+
+This task connects the clean property-matching layer to the ORM persistence
+layer.
+
+Do NOT perform matching here.
+Do NOT create or update Property rows.
+Do NOT persist Listing rows.
+Do NOT commit or rollback transactions.
+
+
+CURRENT FLOW
+
+NormalizedListing
+        +
+building_key
+        ↓
+SQLAlchemyPropertyCandidateProvider
+        ↓
+PropertyCandidate[]
+        ↓
+ConservativePropertyMatcher
+        ↓
+PropertyMatchResult
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/models/property.py
+backend/app/models/building.py
+
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+backend/app/matching/property.py
+backend/app/matching/sqlalchemy_candidates.py
+backend/app/matching/__init__.py
+
+backend/tests/test_sqlalchemy_building_candidate_provider.py
+backend/tests/test_conservative_property_matcher.py
+
+Also inspect SQLAlchemy/session conventions used by:
+
+backend/app/persistence/building.py
+backend/app/repositories/sqlalchemy_raw_listing.py
+
+Report before modifying:
+
+1. exact Property ORM field types;
+2. exact type of Property.id;
+3. exact type of Property.building_id;
+4. exact type of Property.area_total;
+5. exact type/nullability of:
+   - floor
+   - rooms
+   - is_studio;
+6. current PropertyCandidate fields;
+7. how SQLAlchemyBuildingCandidateProvider parses/maps identities;
+8. whether any Property SQLAlchemy provider already exists;
+9. whether any helper already exists for UUID parsing.
+
+Do not modify anything before inspection.
+
+
+==================================================
+2. CREATE PROVIDER
+==================================================
+
+Create:
+
+backend/app/matching/sqlalchemy_property_candidates.py
+
+
+Implement:
+
+class SQLAlchemyPropertyCandidateProvider(PropertyCandidateProvider)
+
+
+Constructor:
+
+def __init__(self, session: Session) -> None:
+    self._session = session
+
+
+Method:
+
+def get_candidates(
+    self,
+    *,
+    listing: NormalizedListing,
+    building_key: str,
+) -> list[PropertyCandidate]:
+    ...
+
+
+==================================================
+3. RESPONSIBILITY BOUNDARY
+==================================================
+
+SQLAlchemyPropertyCandidateProvider is responsible only for:
+
+1. validating/parsing building_key;
+2. querying Property rows for that Building;
+3. mapping ORM rows into PropertyCandidate values.
+
+It must NOT:
+
+- decide which candidate matches;
+- calculate confidence;
+- resolve ambiguity;
+- create Property;
+- update Property;
+- delete Property;
+- create Listing;
+- persist Listing;
+- commit;
+- rollback;
+- flush;
+- normalize source data;
+- perform valuation.
+
+
+==================================================
+4. BUILDING KEY VALIDATION
+==================================================
+
+building_key comes from the application layer as a framework-independent string.
+
+Inside this concrete SQLAlchemy provider:
+
+1. require building_key to be a non-empty string;
+2. parse it using Python UUID;
+3. on invalid value raise ValueError containing:
+
+building_key
+
+
+Example:
+
+try:
+    building_id = UUID(building_key)
+except (AttributeError, TypeError, ValueError):
+    raise ValueError("building_key must be a valid UUID") from None
+
+
+Do NOT query if building_key is invalid.
+
+
+==================================================
+5. QUERY SCOPE
+==================================================
+
+Query Property rows with:
+
+Property.building_id == building_id
+
+
+Do NOT filter by:
+
+- floor;
+- rooms;
+- is_studio;
+- area_total;
+- external listing ID;
+- source;
+- price.
+
+
+This is intentional.
+
+The provider supplies candidates.
+
+ConservativePropertyMatcher decides whether any candidate matches the
+descriptive signature.
+
+
+==================================================
+6. WHY NOT PRE-FILTER
+==================================================
+
+Document this in the provider docstring or module comments:
+
+The provider loads all Property candidates within the resolved Building.
+
+It intentionally does not pre-filter by floor/rooms/studio/area because:
+
+1. matching responsibility belongs to ConservativePropertyMatcher;
+2. the matcher must be able to distinguish:
+   - no_property_candidates;
+   - no_exact_property_signature;
+   - ambiguous_property_candidates;
+3. pre-filtering here would leak identity logic into the SQLAlchemy boundary.
+
+
+==================================================
+7. DETERMINISTIC ORDER
+==================================================
+
+The query must use deterministic ordering:
+
+.order_by(Property.id.asc())
+
+
+Candidate order must NOT be used by the matcher to resolve ambiguity.
+
+Ordering is only for deterministic behavior/tests/debugging.
+
+
+==================================================
+8. QUERY SHAPE
+==================================================
+
+Prefer the same SQLAlchemy 2.x style already used in the project.
+
+Expected shape:
+
+statement = (
+    select(Property)
+    .where(Property.building_id == building_id)
+    .order_by(Property.id.asc())
+)
+
+properties = self._session.scalars(statement).all()
+
+
+Do not use legacy:
+
+session.query(...)
+
+
+==================================================
+9. PROPERTY → PROPERTYCANDIDATE MAPPING
+==================================================
+
+For each Property row return:
+
+PropertyCandidate(
+    key=str(property.id),
+    floor=property.floor,
+    rooms=property.rooms,
+    is_studio=property.is_studio,
+    area_sqm=float(property.area_total),
+)
+
+
+IMPORTANT:
+
+Property.area_total is Numeric/Decimal at the ORM boundary.
+
+Convert to float only when constructing PropertyCandidate.
+
+Do not change PropertyCandidate to Decimal in this task.
+
+
+==================================================
+10. AREA CONVERSION RULE
+==================================================
+
+Use:
+
+float(property.area_total)
+
+
+Do NOT:
+
+- quantize here;
+- round here;
+- format as string;
+- apply tolerance here.
+
+
+Area comparison/quantization remains owned by:
+
+ConservativePropertyMatcher
+
+
+The ORM provider only performs representation conversion.
+
+
+==================================================
+11. STUDIO ROOMS MISMATCH
+==================================================
+
+Current known contract:
+
+NormalizedListing.rooms:
+    int | None
+
+Property.rooms:
+    NOT NULL
+
+MockNormalizer studios:
+    rooms=None
+
+
+This mismatch is NOT solved in Task #5.13.
+
+Provider behavior:
+
+return the actual ORM value:
+
+rooms=property.rooms
+
+
+Do NOT convert:
+
+0 -> None
+1 -> None
+None -> 0
+None -> 1
+
+
+Do not introduce special studio logic.
+
+Explicitly report this mismatch again as a blocker before Property persistence.
+
+
+==================================================
+12. LISTING PARAMETER
+==================================================
+
+The provider signature includes:
+
+listing: NormalizedListing
+
+because it conforms to PropertyCandidateProvider.
+
+However, the SQLAlchemy provider must NOT use listing fields to narrow the SQL
+query in this task.
+
+Do not mutate listing.
+
+Do not copy listing.
+
+It is acceptable for listing to be unused after interface conformance.
+
+
+==================================================
+13. BUILDING EXISTENCE
+==================================================
+
+Do NOT separately query Building.
+
+If:
+
+building_key
+
+is syntactically valid UUID but no Property rows exist for that building_id,
+return:
+
+[]
+
+
+Do not distinguish:
+
+- Building exists with zero Properties;
+- Building UUID does not exist.
+
+That distinction is outside this provider's responsibility.
+
+The already-resolved Building flow is expected to provide a valid building_key.
+
+
+==================================================
+14. SESSION / TRANSACTION OWNERSHIP
+==================================================
+
+The provider receives an injected:
+
+Session
+
+
+Allowed operation:
+
+session.scalars(...)
+
+
+Do NOT call:
+
+session.add
+session.delete
+session.flush
+session.commit
+session.rollback
+session.close
+
+
+Do NOT create a Session internally.
+
+
+==================================================
+15. PUBLIC EXPORT
+==================================================
+
+Update:
+
+backend/app/matching/__init__.py
+
+
+Export:
+
+SQLAlchemyPropertyCandidateProvider
+
+
+Preserve all existing exports.
+
+
+==================================================
+16. TEST FILE
+==================================================
+
+Create:
+
+backend/tests/test_sqlalchemy_property_candidate_provider.py
+
+
+Prefer database-free unit tests unless the existing building-provider tests
+establish a lightweight SQLAlchemy statement inspection pattern.
+
+Do NOT require a live PostgreSQL database.
+
+Use a fake/stub Session that:
+
+- records the statement passed to scalars();
+- returns controlled Property ORM objects;
+- supports `.all()` result behavior.
+
+
+==================================================
+17. REQUIRED TESTS
+==================================================
+
+TEST 1 — invalid empty building_key
+
+Input:
+
+""
+
+Expected:
+
+ValueError containing "building_key"
+
+Session must not be queried.
+
+
+TEST 2 — whitespace building_key
+
+Input:
+
+"   "
+
+Expected:
+
+ValueError containing "building_key"
+
+Session must not be queried.
+
+
+TEST 3 — malformed UUID
+
+Input:
+
+"not-a-uuid"
+
+Expected:
+
+ValueError containing "building_key"
+
+Session must not be queried.
+
+
+TEST 4 — valid UUID with no Property rows
+
+Fake session returns empty collection.
+
+Expected:
+
+[]
+
+
+TEST 5 — one Property maps correctly
+
+Create Property ORM object with:
+
+id=<known UUID>
+building_id=<known UUID>
+floor=5
+rooms=2
+area_total=Decimal("55.50")
+is_studio=False
+
+Expected:
+
+PropertyCandidate(
+    key=str(property_id),
+    floor=5,
+    rooms=2,
+    is_studio=False,
+    area_sqm=55.5,
+)
+
+
+TEST 6 — multiple Properties map correctly
+
+Return at least two ORM rows.
+
+Verify:
+
+- same number of candidates;
+- each field maps correctly.
+
+
+TEST 7 — nullable floor preserved
+
+Property.floor=None
+
+Expected:
+
+candidate.floor is None
+
+
+TEST 8 — rooms value preserved exactly
+
+Example:
+
+rooms=0
+
+Expected:
+
+candidate.rooms == 0
+
+Do NOT normalize studio semantics.
+
+
+TEST 9 — is_studio preserved exactly
+
+
+TEST 10 — Decimal area converts to float
+
+Decimal("55.50") -> 55.5
+
+
+TEST 11 — Property ID converts to string
+
+
+TEST 12 — query uses provided building UUID
+
+Verify compiled/inspected statement contains or binds:
+
+Property.building_id == parsed building UUID
+
+Use the same testing technique as existing
+test_sqlalchemy_building_candidate_provider.py if available.
+
+
+TEST 13 — query does not use listing descriptive attributes
+
+Construct listing with values that differ from returned Property rows.
+
+Provider must still return the rows supplied by the session.
+
+This proves it is not performing matcher responsibility.
+
+
+TEST 14 — listing object is not mutated
+
+Capture a copy/equality before call.
+
+Verify unchanged after call.
+
+
+TEST 15 — session queried exactly once
+
+
+TEST 16 — deterministic ORDER BY Property.id
+
+Inspect the SQLAlchemy statement and verify ordering by:
+
+Property.id ASC
+
+
+TEST 17 — provider performs no write operations
+
+Fake session should track:
+
+add
+delete
+flush
+commit
+rollback
+close
+
+Verify none are called.
+
+
+==================================================
+18. OPTIONAL INTEGRATION TEST
+==================================================
+
+If it can be done cleanly without a real DB, add one lightweight integration
+test:
+
+SQLAlchemyPropertyCandidateProvider
+        ↓
+ConservativePropertyMatcher
+
+
+Scenario:
+
+Provider returns one Property with:
+
+floor=5
+rooms=2
+is_studio=False
+area_total=Decimal("55.50")
+
+
+Listing has:
+
+floor=5
+rooms=2
+is_studio=False
+area_sqm=55.5
+
+
+Expected matcher result:
+
+matched=True
+confidence=0.80
+reason="exact_descriptive_signature"
+
+
+Do not add a live database dependency just for this test.
+
+
+==================================================
+19. ARCHITECTURAL GUARDRAILS
+==================================================
+
+SQLAlchemy is allowed only in:
+
+backend/app/matching/sqlalchemy_property_candidates.py
+
+
+Framework-independent files must remain clean:
+
+backend/app/matching/property.py
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+
+
+Do NOT modify those files unless required only for an import/export mistake.
+
+They must continue not importing:
+
+sqlalchemy
+app.models
+app.repositories
+app.database
+
+
+Do NOT:
+
+- implement PropertyResolutionService;
+- implement PropertyPersistenceService;
+- create Property rows;
+- modify Property model;
+- modify Building model;
+- modify Listing model;
+- modify NormalizedListing;
+- modify MockNormalizer;
+- modify migrations;
+- change Property.rooms nullability;
+- convert studio rooms;
+- add unique constraints;
+- add dependencies.
+
+
+==================================================
+20. FILE SCOPE
+==================================================
+
+Create:
+
+backend/app/matching/sqlalchemy_property_candidates.py
+backend/tests/test_sqlalchemy_property_candidate_provider.py
+
+
+Modify only:
+
+backend/app/matching/__init__.py
+
+
+Do not modify any other files.
+
+If inspection reveals broader required changes:
+
+STOP and report the conflict before editing unrelated files.
+
+
+==================================================
+21. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_sqlalchemy_property_candidate_provider.py \
+    tests/test_conservative_property_matcher.py \
+    tests/test_property_matcher_contract.py \
+    tests/test_building_persistence_service.py \
+    tests/test_building_resolution_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then:
+
+git diff --check
+
+
+Run a write/transaction guardrail confirming that:
+
+backend/app/matching/sqlalchemy_property_candidates.py
+
+does NOT contain or call:
+
+.commit(
+.rollback(
+.flush(
+.add(
+.delete(
+.close(
+
+
+Then run the framework-independent import guardrail confirming:
+
+backend/app/matching/property.py
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+
+still do NOT import:
+
+sqlalchemy
+app.models
+app.repositories
+app.database
+
+
+==================================================
+22. REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+
+2. exact SQLAlchemy query shape;
+
+3. building_key parsing behavior;
+
+4. Property → PropertyCandidate mapping;
+
+5. explicit statement that listing fields are not used to pre-filter candidates;
+
+6. explicit studio rooms mismatch finding;
+
+7. files created/modified;
+
+8. complete contents of:
+   backend/app/matching/sqlalchemy_property_candidates.py
+
+9. complete updated contents of:
+   backend/app/matching/__init__.py
+
+10. complete contents of:
+    backend/tests/test_sqlalchemy_property_candidate_provider.py
+
+11. optional integration-test behavior if added;
+
+12. pytest result;
+
+13. git diff --check result;
+
+14. write/transaction guardrail result;
+
+15. framework-independent import guardrail result;
+
+16. git status --short.
+
+Do not commit.
+
+Stop after reporting.
