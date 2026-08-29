@@ -3,8 +3,10 @@
 from .address import canonicalize_address
 from .building import BuildingMatchResult, BuildingMatcher
 from .candidates import BuildingCandidate, BuildingCandidateProvider
+from .conservative_property import ConservativePropertyMatcher
 from .exact_building import ExactBuildingMatcher
 from .property import PropertyMatchResult, PropertyMatcher
+from .property_candidates import PropertyCandidate, PropertyCandidateProvider
 from .sqlalchemy_candidates import SQLAlchemyBuildingCandidateProvider
 
 __all__ = [
@@ -17,4 +19,7 @@ __all__ = [
     "SQLAlchemyBuildingCandidateProvider",
     "PropertyMatcher",
     "PropertyMatchResult",
+    "PropertyCandidate",
+    "PropertyCandidateProvider",
+    "ConservativePropertyMatcher",
 ]

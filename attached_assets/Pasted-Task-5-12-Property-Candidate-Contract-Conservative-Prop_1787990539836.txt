@@ -1,0 +1,990 @@
+Task #5.12 — Property Candidate Contract + Conservative Property Matcher
+
+Goal:
+Introduce a framework-independent PropertyCandidate contract,
+PropertyCandidateProvider interface, and the first conservative deterministic
+Property matcher for already-resolved Buildings.
+
+The matcher must prefer ambiguity over unsafe forced matching.
+
+IMPORTANT DOMAIN CONSTRAINT
+
+Current Property data does NOT contain a truly stable cross-source apartment
+identity such as:
+
+- apartment number;
+- cadastral number;
+- canonical external property ID.
+
+Therefore:
+
+floor + rooms + is_studio + area
+
+must be treated as a descriptive signature only.
+
+It may support a conservative MVP heuristic match, but it must NOT be treated
+as guaranteed physical-apartment identity.
+
+
+CURRENT FLOW
+
+NormalizedListing
+        +
+building_key
+        ↓
+PropertyCandidateProvider
+        ↓
+PropertyCandidate[]
+        ↓
+ConservativePropertyMatcher
+        ↓
+PropertyMatchResult
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/matching/property.py
+backend/app/matching/__init__.py
+
+backend/app/models/property.py
+backend/app/models/building.py
+backend/app/models/listing.py
+
+backend/app/normalization/types.py
+backend/app/normalization/mock.py
+
+backend/tests/test_property_matcher_contract.py
+
+Also inspect current typing/nullability for:
+
+- Property.floor
+- Property.rooms
+- Property.area_total
+- Property.is_studio
+
+and corresponding NormalizedListing fields:
+
+- floor
+- rooms
+- area_sqm
+- is_studio
+
+
+Report before modifying:
+
+1. exact Property ORM field types;
+2. Property required/non-null fields;
+3. exact overlap with NormalizedListing;
+4. exact rooms nullability mismatch, if present;
+5. exact area representation/type;
+6. current studio normalization behavior;
+7. whether a stable apartment identity field exists;
+8. whether any PropertyCandidate abstraction already exists.
+
+Do not modify anything before inspection.
+
+
+==================================================
+2. EXPLICIT STUDIO CONTRACT CHECK
+==================================================
+
+Inspect whether:
+
+NormalizedListing.rooms
+    is int | None
+
+and whether:
+
+Property.rooms
+    is NOT NULL.
+
+Also confirm whether MockNormalizer currently produces:
+
+rooms=None
+is_studio=True
+
+for studios.
+
+If this mismatch exists:
+
+REPORT IT CLEARLY.
+
+Do NOT fix it in Task #5.12.
+
+Do NOT silently convert:
+
+None -> 0
+None -> 1
+
+This must remain a separate persistence/schema decision later.
+
+
+==================================================
+3. CREATE PROPERTY CANDIDATE CONTRACT
+==================================================
+
+Create:
+
+backend/app/matching/property_candidates.py
+
+
+Define:
+
+@dataclass(frozen=True, slots=True)
+class PropertyCandidate
+
+
+Fields:
+
+key: str
+
+floor: int | None
+
+rooms: int | None
+
+is_studio: bool
+
+area_sqm: float
+
+
+Semantics:
+
+key
+    Framework-independent Property identity.
+
+    A future SQLAlchemy provider may use str(Property.id),
+    but this contract must not know about UUID or ORM.
+
+
+floor
+rooms
+is_studio
+area_sqm
+
+    Descriptive property attributes used by the MVP matcher.
+
+
+==================================================
+4. PROPERTY CANDIDATE VALIDATION
+==================================================
+
+Validate in __post_init__:
+
+1. key
+   - must be str;
+   - must be non-empty after strip.
+
+2. floor
+   - may be None;
+   - if present, must be int.
+
+3. rooms
+   - may be None;
+   - if present, must be int;
+   - must be >= 0.
+
+4. is_studio
+   - must be bool.
+
+5. area_sqm
+   - must be numeric;
+   - must be finite;
+   - must be > 0.
+
+Raise ValueError containing the relevant field name.
+
+IMPORTANT:
+
+Do NOT enforce a relationship such as:
+
+is_studio=True -> rooms must be None
+
+inside PropertyCandidate yet.
+
+The current persistence/schema mismatch must be resolved separately.
+
+
+==================================================
+5. PROPERTY CANDIDATE PROVIDER CONTRACT
+==================================================
+
+In:
+
+backend/app/matching/property_candidates.py
+
+define:
+
+class PropertyCandidateProvider(ABC)
+
+
+Method:
+
+@abstractmethod
+def get_candidates(
+    self,
+    *,
+    listing: NormalizedListing,
+    building_key: str,
+) -> list[PropertyCandidate]:
+    ...
+
+
+Responsibilities:
+
+The provider supplies plausible Property candidates within an already-resolved
+Building.
+
+The provider does NOT decide which candidate matches.
+
+The provider contract must remain framework-independent.
+
+
+==================================================
+6. CREATE CONSERVATIVE PROPERTY MATCHER
+==================================================
+
+Create:
+
+backend/app/matching/conservative_property.py
+
+
+Implement:
+
+class ConservativePropertyMatcher(PropertyMatcher)
+
+
+Constructor:
+
+def __init__(
+    self,
+    candidate_provider: PropertyCandidateProvider,
+) -> None:
+    self._candidate_provider = candidate_provider
+
+
+Method:
+
+def match(
+    self,
+    *,
+    listing: NormalizedListing,
+    building_key: str,
+) -> PropertyMatchResult:
+    ...
+
+
+==================================================
+7. BUILDING KEY VALIDATION
+==================================================
+
+Before calling the provider:
+
+building_key must be:
+
+- str;
+- non-empty after strip.
+
+Otherwise raise:
+
+ValueError
+
+containing:
+
+building_key
+
+
+Do NOT parse UUIDs.
+
+The matching layer remains framework-independent.
+
+
+==================================================
+8. PROVIDER INVOCATION RULE
+==================================================
+
+Call:
+
+self._candidate_provider.get_candidates(
+    listing=listing,
+    building_key=building_key,
+)
+
+exactly once.
+
+Do not mutate:
+
+listing
+
+Do not copy or normalize the listing inside this matcher.
+
+
+==================================================
+9. MVP DESCRIPTIVE SIGNATURE
+==================================================
+
+For Task #5.12 define the descriptive signature as exactly:
+
+floor
+rooms
+is_studio
+area_sqm
+
+
+A candidate matches the listing signature only when:
+
+candidate.floor == listing["floor"]
+
+candidate.rooms == listing["rooms"]
+
+candidate.is_studio == listing["is_studio"]
+
+and candidate.area_sqm matches listing["area_sqm"]
+according to the exact area normalization rule below.
+
+
+==================================================
+10. AREA NORMALIZATION RULE
+==================================================
+
+Do NOT compare raw floats directly.
+
+Use:
+
+Decimal
+ROUND_HALF_UP
+
+
+Normalize both areas by converting through string representation:
+
+Decimal(str(value))
+
+
+Then quantize both to:
+
+Decimal("0.01")
+
+
+with:
+
+ROUND_HALF_UP
+
+
+Conceptually:
+
+Decimal(str(value)).quantize(
+    Decimal("0.01"),
+    rounding=ROUND_HALF_UP,
+)
+
+
+Examples:
+
+55.5
+55.50
+
+must compare equal.
+
+
+55.504
+
+normalizes to:
+
+55.50
+
+
+55.505
+
+normalizes to:
+
+55.51
+
+
+Do NOT use:
+
+- float epsilon;
+- abs(a - b);
+- percentage tolerance;
+- configurable area tolerance.
+
+This task must stay deterministic.
+
+
+==================================================
+11. MATCHING BEHAVIOR
+==================================================
+
+CASE A — provider returns no candidates
+
+Return:
+
+PropertyMatchResult(
+    matched=False,
+    candidate_key=None,
+    confidence=0.0,
+    reason="no_property_candidates",
+)
+
+
+CASE B — candidates exist but none match exact descriptive signature
+
+Return:
+
+PropertyMatchResult(
+    matched=False,
+    candidate_key=None,
+    confidence=0.0,
+    reason="no_exact_property_signature",
+)
+
+
+CASE C — exactly one candidate matches exact descriptive signature
+
+Return:
+
+PropertyMatchResult(
+    matched=True,
+    candidate_key=<matching candidate key>,
+    confidence=0.80,
+    reason="exact_descriptive_signature",
+)
+
+
+IMPORTANT:
+
+confidence=0.80 is an internal heuristic confidence score.
+
+It is NOT:
+
+- a statistical probability;
+- proof that both source listings represent the same physical apartment.
+
+
+CASE D — two or more candidates match exact descriptive signature
+
+Return:
+
+PropertyMatchResult(
+    matched=False,
+    candidate_key=None,
+    confidence=0.0,
+    reason="ambiguous_property_candidates",
+)
+
+
+This is a hard safety behavior.
+
+Do NOT choose one candidate using:
+
+- list order;
+- key sorting;
+- UUID;
+- creation time;
+- source;
+- price;
+- external_id;
+- first result;
+- last result.
+
+
+==================================================
+12. CONSERVATIVE MATCHER DOCSTRING
+==================================================
+
+Document clearly in ConservativePropertyMatcher:
+
+A unique exact descriptive signature is accepted only as an MVP heuristic
+match within one already-resolved Building.
+
+It is not guaranteed physical-apartment identity.
+
+If more than one candidate shares the same signature, the result must be
+ambiguous.
+
+Future identity strengthening may use:
+
+- apartment number;
+- cadastral identifier;
+- source crosswalk;
+- richer canonical property identity data.
+
+
+==================================================
+13. STUDIO MATCHING RULE
+==================================================
+
+Do NOT coerce studio rooms.
+
+If listing has:
+
+rooms=None
+is_studio=True
+
+then it may match only a candidate with:
+
+rooms=None
+is_studio=True
+
+assuming floor and area also match.
+
+
+Candidate:
+
+rooms=0
+
+must NOT match listing:
+
+rooms=None
+
+
+Do not solve persistence compatibility here.
+
+
+==================================================
+14. PUBLIC EXPORTS
+==================================================
+
+Update:
+
+backend/app/matching/__init__.py
+
+
+Export:
+
+PropertyCandidate
+PropertyCandidateProvider
+ConservativePropertyMatcher
+
+
+Preserve existing exports:
+
+PropertyMatcher
+PropertyMatchResult
+
+and all existing Building matching exports.
+
+
+==================================================
+15. TEST FILE
+==================================================
+
+Create:
+
+backend/tests/test_conservative_property_matcher.py
+
+
+Use:
+
+FakePropertyCandidateProvider
+
+in memory.
+
+Do NOT use:
+
+- SQLAlchemy;
+- PostgreSQL;
+- ORM queries.
+
+
+==================================================
+16. REQUIRED MATCHER TESTS
+==================================================
+
+TEST 1 — no candidates
+
+Expected:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="no_property_candidates"
+
+
+TEST 2 — one exact descriptive signature
+
+Listing:
+
+floor=5
+rooms=2
+is_studio=False
+area_sqm=55.5
+
+Candidate has same values.
+
+Expected:
+
+matched=True
+candidate_key preserved
+confidence=0.80
+reason="exact_descriptive_signature"
+
+
+TEST 3 — 55.5 equals 55.50
+
+Verify area normalization.
+
+
+TEST 4 — ROUND_HALF_UP behavior
+
+Verify explicitly:
+
+55.504 -> 55.50
+
+55.505 -> 55.51
+
+
+TEST 5 — different floor
+
+Must not match.
+
+
+TEST 6 — different rooms
+
+Must not match.
+
+
+TEST 7 — different is_studio
+
+Must not match.
+
+
+TEST 8 — different normalized area
+
+Must not match.
+
+
+TEST 9 — candidates exist but none match
+
+Expected:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="no_exact_property_signature"
+
+
+TEST 10 — two exact candidates
+
+Two candidates with identical descriptive signature.
+
+Expected:
+
+matched=False
+candidate_key=None
+confidence=0.0
+reason="ambiguous_property_candidates"
+
+
+TEST 11 — candidate order cannot resolve ambiguity
+
+Repeat ambiguous test with reversed candidate order.
+
+Result must remain ambiguous.
+
+
+TEST 12 — building_key passed unchanged
+
+Fake provider records the building_key.
+
+Verify exact same string.
+
+
+TEST 13 — listing object forwarded unchanged
+
+Fake provider records listing.
+
+Verify:
+
+received_listing is listing
+
+
+TEST 14 — provider called exactly once
+
+
+TEST 15 — invalid building_key
+
+Test at least:
+
+""
+"   "
+
+Expected:
+
+ValueError containing "building_key"
+
+Provider must not be called.
+
+
+TEST 16 — studio rooms=None
+
+Listing:
+
+rooms=None
+is_studio=True
+
+Candidate:
+
+rooms=None
+is_studio=True
+
+with same floor and area.
+
+Expected match.
+
+
+TEST 17 — studio rooms are not coerced
+
+Listing:
+
+rooms=None
+is_studio=True
+
+Candidate:
+
+rooms=0
+is_studio=True
+
+Must NOT match.
+
+
+==================================================
+17. REQUIRED PROPERTY CANDIDATE TESTS
+==================================================
+
+Add tests in the same test file for:
+
+
+TEST 18 — PropertyCandidate immutable
+
+
+TEST 19 — PropertyCandidateProvider is abstract
+
+
+TEST 20 — invalid key
+
+Test:
+
+""
+"   "
+
+
+TEST 21 — valid nullable floor
+
+
+TEST 22 — invalid floor type
+
+
+TEST 23 — valid nullable rooms
+
+
+TEST 24 — invalid rooms below zero
+
+
+TEST 25 — invalid rooms type
+
+
+TEST 26 — invalid is_studio type
+
+
+TEST 27 — invalid area zero
+
+
+TEST 28 — invalid area negative
+
+
+TEST 29 — invalid area NaN
+
+
+TEST 30 — invalid area +inf
+
+
+TEST 31 — invalid area -inf
+
+
+All invalid cases should raise ValueError containing the relevant field name.
+
+
+==================================================
+18. EXISTING CONTRACT MUST REMAIN VALID
+==================================================
+
+Do not weaken or modify behavior in:
+
+backend/app/matching/property.py
+
+
+The new ConservativePropertyMatcher must conform to:
+
+PropertyMatcher
+
+
+Do not remove or weaken:
+
+backend/tests/test_property_matcher_contract.py
+
+
+==================================================
+19. ARCHITECTURAL GUARDRAILS
+==================================================
+
+These files must remain framework-independent:
+
+backend/app/matching/property.py
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+
+
+They must NOT import:
+
+sqlalchemy
+app.models
+app.repositories
+app.database
+
+
+Allowed imports include:
+
+standard library
+app.normalization.types
+app.matching.property
+app.matching.property_candidates
+
+
+Do NOT:
+
+- create SQLAlchemyPropertyCandidateProvider;
+- query the DB;
+- parse UUIDs;
+- create Property ORM records;
+- create PropertyResolutionService;
+- create PropertyPersistenceService;
+- modify Property model;
+- modify Building model;
+- modify Listing model;
+- modify NormalizedListing;
+- modify MockNormalizer;
+- modify migrations;
+- change rooms nullability;
+- convert studio rooms=None;
+- add unique constraints;
+- add dependencies.
+
+
+==================================================
+20. FILE SCOPE
+==================================================
+
+Create only:
+
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+backend/tests/test_conservative_property_matcher.py
+
+
+Modify only:
+
+backend/app/matching/__init__.py
+
+
+Do not modify any other files.
+
+If inspection reveals that requested behavior requires broader changes:
+
+STOP.
+
+Report the conflict instead of expanding scope.
+
+
+==================================================
+21. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_conservative_property_matcher.py \
+    tests/test_property_matcher_contract.py \
+    tests/test_building_persistence_service.py \
+    tests/test_building_resolution_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_normalizer_interface.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then run:
+
+git diff --check
+
+
+Then run an import guardrail confirming that:
+
+backend/app/matching/property.py
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+
+do NOT import:
+
+sqlalchemy
+app.models
+app.repositories
+app.database
+
+
+==================================================
+22. REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+
+2. exact studio rooms contract mismatch finding;
+
+3. PropertyCandidate design;
+
+4. PropertyCandidate validation rules;
+
+5. exact descriptive signature rule;
+
+6. exact area normalization rule;
+
+7. exact matching behavior for:
+   - no candidates;
+   - no exact signature;
+   - one exact signature;
+   - multiple exact signatures;
+
+8. files created/modified;
+
+9. complete contents of:
+   backend/app/matching/property_candidates.py
+
+10. complete contents of:
+    backend/app/matching/conservative_property.py
+
+11. complete updated contents of:
+    backend/app/matching/__init__.py
+
+12. complete contents of:
+    backend/tests/test_conservative_property_matcher.py
+
+13. pytest result;
+
+14. git diff --check result;
+
+15. import guardrail result;
+
+16. git status --short.
+
+Do not commit.
+
+Stop after reporting.
