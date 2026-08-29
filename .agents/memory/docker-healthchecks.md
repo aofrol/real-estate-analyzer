@@ -51,3 +51,12 @@ Pinned package versions (e.g. `next@14.2.20`) may be blocked by Replit's securit
 ## Rule 5 — Replit workflow outputType for Docker Compose projects
 - Use `outputType: "console"` only if there is NO webview (no port to show). The Replit Preview shows "Your app crashed" when a console-type workflow is in failed state.
 - Use `outputType: "webview"` with `waitForPort: 5000` for the main user-facing app — but only when a process in the workflow directly owns port 5000 (not via Docker NAT).
+
+---
+
+## Rule 6 — Run post-merge migrations from the host
+Do not use `docker compose exec` for readiness checks or `docker compose run` to reach the database by its Compose service name in this Replit environment.
+
+**Why:** `exec` fails because `setns` is blocked, and an ephemeral Compose run container can time out connecting to the sibling database even while the database is healthy and its published host port works.
+
+**How to apply:** Probe PostgreSQL from the host with `pg_isready` against its published port. Run Alembic with the managed workspace Python and replace the Compose hostname `db` with `127.0.0.1` in the runtime-only database URL; never print that URL.
