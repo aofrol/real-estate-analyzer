@@ -1,0 +1,854 @@
+Task #5.15 — Property Resolution Service
+
+Goal:
+Introduce a framework-independent PropertyResolutionService that translates
+PropertyMatchResult into an explicit application decision:
+
+- matched
+- create_required
+- ambiguous
+
+The service must never turn ambiguity into creation.
+
+This task is orchestration only.
+
+Do NOT access the database.
+Do NOT use SQLAlchemy.
+Do NOT create or update Property rows.
+Do NOT parse UUIDs.
+Do NOT persist anything.
+
+
+CURRENT FLOW
+
+NormalizedListing
+      +
+building_key
+      ↓
+PropertyMatcher
+      ↓
+PropertyMatchResult
+      ↓
+PropertyResolutionService
+      ↓
+PropertyResolutionResult
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/matching/property.py
+backend/app/matching/conservative_property.py
+backend/app/matching/property_candidates.py
+
+backend/app/resolution/building.py
+backend/app/resolution/__init__.py
+
+backend/tests/test_building_resolution_service.py
+backend/tests/test_property_matcher_contract.py
+backend/tests/test_conservative_property_matcher.py
+
+
+Report before modifying:
+
+1. exact PropertyMatchResult fields;
+2. exact matcher reasons currently produced by ConservativePropertyMatcher;
+3. exact BuildingResolutionResult shape;
+4. exact BuildingResolutionService behavior;
+5. current exports from backend/app/resolution/__init__.py;
+6. whether any PropertyResolutionService already exists;
+7. whether any property persistence logic currently exists.
+
+Do not modify anything before inspection.
+
+
+==================================================
+2. CREATE PROPERTY RESOLUTION SERVICE
+==================================================
+
+Create:
+
+backend/app/resolution/property.py
+
+
+Implement:
+
+@dataclass(frozen=True, slots=True)
+class PropertyResolutionResult
+
+
+Fields:
+
+status: str
+property_key: str | None
+match_confidence: float
+reason: str
+
+
+Allowed status values:
+
+"matched"
+"create_required"
+"ambiguous"
+
+
+==================================================
+3. PROPERTY RESOLUTION RESULT INVARIANTS
+==================================================
+
+Validate in __post_init__.
+
+
+STATUS
+
+status must be exactly one of:
+
+- "matched"
+- "create_required"
+- "ambiguous"
+
+Otherwise raise ValueError containing:
+
+status
+
+
+MATCH CONFIDENCE
+
+match_confidence must:
+
+- be numeric;
+- not be bool;
+- be finite;
+- be between 0.0 and 1.0 inclusive.
+
+Otherwise raise ValueError containing:
+
+match_confidence
+
+
+REASON
+
+reason must be:
+
+- str;
+- non-empty after strip.
+
+Otherwise raise ValueError containing:
+
+reason
+
+
+==================================================
+4. MATCHED INVARIANT
+==================================================
+
+If:
+
+status == "matched"
+
+then:
+
+property_key must be:
+    - str;
+    - non-empty after strip.
+
+and:
+
+match_confidence must be > 0.0
+
+
+Invalid examples:
+
+status="matched", property_key=None
+status="matched", property_key=""
+status="matched", match_confidence=0.0
+
+
+Raise ValueError containing the relevant field name.
+
+
+==================================================
+5. UNRESOLVED INVARIANT
+==================================================
+
+If status is:
+
+"create_required"
+or
+"ambiguous"
+
+then:
+
+property_key must be None
+
+and:
+
+match_confidence must equal 0.0
+
+
+Invalid examples:
+
+status="create_required", property_key="abc"
+status="ambiguous", property_key="abc"
+status="create_required", match_confidence=0.5
+status="ambiguous", match_confidence=0.5
+
+
+Raise ValueError containing the relevant field name.
+
+
+==================================================
+6. CREATE PROPERTY RESOLUTION SERVICE
+==================================================
+
+Implement:
+
+class PropertyResolutionService
+
+
+Constructor:
+
+def __init__(
+    self,
+    matcher: PropertyMatcher,
+) -> None:
+    self._matcher = matcher
+
+
+Method:
+
+def resolve(
+    self,
+    *,
+    listing: NormalizedListing,
+    building_key: str,
+) -> PropertyResolutionResult:
+    ...
+
+
+==================================================
+7. MATCHER INVOCATION
+==================================================
+
+Call:
+
+self._matcher.match(
+    listing=listing,
+    building_key=building_key,
+)
+
+exactly once.
+
+
+Forward:
+
+- the exact same listing object;
+- the exact same building_key string.
+
+
+Do NOT:
+
+- copy listing;
+- mutate listing;
+- normalize building_key;
+- parse UUIDs;
+- perform DB lookups.
+
+
+==================================================
+8. MATCHED RESULT
+==================================================
+
+If:
+
+match_result.matched is True
+
+return:
+
+PropertyResolutionResult(
+    status="matched",
+    property_key=match_result.candidate_key,
+    match_confidence=match_result.confidence,
+    reason=match_result.reason,
+)
+
+
+Do not alter:
+
+candidate_key
+confidence
+reason
+
+
+==================================================
+9. CREATE REQUIRED REASONS
+==================================================
+
+The following unmatched matcher reasons mean a new Property may be needed:
+
+"no_property_candidates"
+
+"no_exact_property_signature"
+
+
+Map both to:
+
+PropertyResolutionResult(
+    status="create_required",
+    property_key=None,
+    match_confidence=0.0,
+    reason=match_result.reason,
+)
+
+
+IMPORTANT:
+
+Do not create the Property here.
+
+This service only returns the application decision.
+
+
+==================================================
+10. AMBIGUOUS REASON
+==================================================
+
+The following matcher reason must map to:
+
+"ambiguous_property_candidates"
+
+
+Return:
+
+PropertyResolutionResult(
+    status="ambiguous",
+    property_key=None,
+    match_confidence=0.0,
+    reason=match_result.reason,
+)
+
+
+CRITICAL SAFETY RULE:
+
+ambiguous_property_candidates
+
+must NEVER become:
+
+create_required
+
+
+This prevents duplicate Property creation when multiple existing Properties
+already share the same descriptive signature.
+
+
+==================================================
+11. UNKNOWN UNMATCHED REASON
+==================================================
+
+If:
+
+match_result.matched is False
+
+and:
+
+match_result.reason
+
+is not one of:
+
+- no_property_candidates
+- no_exact_property_signature
+- ambiguous_property_candidates
+
+raise:
+
+ValueError
+
+
+Error message must contain:
+
+Unsupported matcher reason
+
+
+Example:
+
+raise ValueError(
+    f"Unsupported matcher reason: {match_result.reason}"
+)
+
+
+Do not silently default to create_required.
+
+
+==================================================
+12. MATCHED RESULT SAFETY
+==================================================
+
+PropertyMatchResult already enforces:
+
+matched=True
+    → non-empty candidate_key
+    → confidence valid
+
+
+Do not duplicate matcher validation unnecessarily.
+
+PropertyResolutionResult will independently validate its own invariants.
+
+
+==================================================
+13. BUILDING KEY RESPONSIBILITY
+==================================================
+
+PropertyResolutionService must NOT validate or parse building_key beyond simply
+passing it to the matcher.
+
+The matcher/provider layer already owns building_key validation where
+appropriate.
+
+This service remains orchestration-only.
+
+
+==================================================
+14. PUBLIC EXPORTS
+==================================================
+
+Modify:
+
+backend/app/resolution/__init__.py
+
+
+Export:
+
+PropertyResolutionResult
+PropertyResolutionService
+
+
+Preserve existing exports:
+
+BuildingResolutionResult
+BuildingResolutionService
+
+
+Expected public API conceptually:
+
+from .building import BuildingResolutionResult, BuildingResolutionService
+from .property import PropertyResolutionResult, PropertyResolutionService
+
+
+==================================================
+15. TEST FILE
+==================================================
+
+Create:
+
+backend/tests/test_property_resolution_service.py
+
+
+Use a fake PropertyMatcher.
+
+Do NOT use:
+
+- SQLAlchemy;
+- ORM models;
+- PostgreSQL;
+- repositories;
+- live candidate provider.
+
+
+A simple recording fake matcher is preferred.
+
+
+==================================================
+16. REQUIRED SERVICE TESTS
+==================================================
+
+TEST 1 — matched exact descriptive signature
+
+Fake matcher returns:
+
+PropertyMatchResult(
+    matched=True,
+    candidate_key="property-test-001",
+    confidence=0.80,
+    reason="exact_descriptive_signature",
+)
+
+Expected:
+
+status == "matched"
+property_key == "property-test-001"
+match_confidence == 0.80
+reason == "exact_descriptive_signature"
+
+
+TEST 2 — no_property_candidates
+
+Fake matcher returns unmatched:
+
+reason="no_property_candidates"
+
+Expected:
+
+status="create_required"
+property_key=None
+match_confidence=0.0
+same reason preserved
+
+
+TEST 3 — no_exact_property_signature
+
+Expected:
+
+status="create_required"
+
+
+TEST 4 — ambiguous_property_candidates
+
+Expected:
+
+status="ambiguous"
+property_key=None
+match_confidence=0.0
+
+
+TEST 5 — ambiguous never becomes create_required
+
+Assert explicitly:
+
+result.status == "ambiguous"
+result.status != "create_required"
+
+
+TEST 6 — unknown unmatched matcher reason
+
+Example:
+
+reason="unexpected_reason"
+
+Expected:
+
+ValueError containing:
+
+Unsupported matcher reason
+
+
+TEST 7 — matcher called exactly once
+
+
+TEST 8 — exact same listing object forwarded
+
+Assert:
+
+matcher.received_listing is listing
+
+
+TEST 9 — exact building_key forwarded
+
+Example:
+
+building_key = "application-building-key/001"
+
+Assert exact equality.
+
+
+TEST 10 — resolution service does not mutate listing
+
+
+==================================================
+17. OPTIONAL INTEGRATION TEST
+==================================================
+
+If clean and database-free, add one small integration test using:
+
+ConservativePropertyMatcher
++
+FakePropertyCandidateProvider
++
+PropertyResolutionService
+
+
+Scenario A:
+
+No property candidates.
+
+Expected:
+
+create_required
+
+
+Scenario B:
+
+One exact candidate.
+
+Expected:
+
+matched
+
+
+Scenario C:
+
+Two exact candidates.
+
+Expected:
+
+ambiguous
+
+
+Do not introduce SQLAlchemy or live DB for this integration test.
+
+
+==================================================
+18. REQUIRED RESULT INVARIANT TESTS
+==================================================
+
+Add direct tests for PropertyResolutionResult.
+
+
+TEST 11 — valid matched result
+
+
+TEST 12 — valid create_required result
+
+
+TEST 13 — valid ambiguous result
+
+
+TEST 14 — invalid status
+
+Example:
+
+status="unknown"
+
+Expected:
+
+ValueError containing "status"
+
+
+TEST 15 — invalid confidence below zero
+
+
+TEST 16 — invalid confidence above one
+
+
+TEST 17 — invalid confidence NaN
+
+
+TEST 18 — invalid confidence +inf
+
+
+TEST 19 — invalid confidence -inf
+
+
+TEST 20 — bool confidence rejected
+
+Important:
+
+True and False must not be accepted as numeric confidence values.
+
+
+TEST 21 — matched requires property_key
+
+
+TEST 22 — matched rejects blank property_key
+
+
+TEST 23 — matched requires confidence > 0
+
+
+TEST 24 — create_required requires property_key=None
+
+
+TEST 25 — ambiguous requires property_key=None
+
+
+TEST 26 — create_required requires confidence == 0
+
+
+TEST 27 — ambiguous requires confidence == 0
+
+
+TEST 28 — reason required
+
+Test:
+
+""
+"   "
+
+Expected ValueError containing "reason"
+
+
+TEST 29 — result is immutable
+
+Attempt assignment and expect FrozenInstanceError.
+
+
+==================================================
+19. ARCHITECTURAL GUARDRAILS
+==================================================
+
+These files must remain framework-independent:
+
+backend/app/resolution/property.py
+backend/app/matching/property.py
+backend/app/matching/property_candidates.py
+backend/app/matching/conservative_property.py
+
+
+They must NOT import:
+
+sqlalchemy
+app.models
+app.repositories
+app.database
+app.persistence
+
+
+PropertyResolutionService must NOT:
+
+- instantiate sessions;
+- parse UUIDs;
+- access ORM models;
+- query database;
+- create Property;
+- call add;
+- call flush;
+- call commit;
+- call rollback;
+- call delete;
+- perform Listing persistence;
+- perform deduplication;
+- perform valuation.
+
+
+==================================================
+20. FILE SCOPE
+==================================================
+
+Create only:
+
+backend/app/resolution/property.py
+backend/tests/test_property_resolution_service.py
+
+
+Modify only:
+
+backend/app/resolution/__init__.py
+
+
+Do not modify:
+
+backend/app/matching/*
+backend/app/models/*
+backend/app/persistence/*
+backend/app/normalization/*
+backend/scripts/*
+alembic/*
+dependencies
+
+
+If inspection reveals a required broader change:
+
+STOP and report the conflict instead of expanding scope.
+
+
+==================================================
+21. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_property_resolution_service.py \
+    tests/test_conservative_property_matcher.py \
+    tests/test_property_matcher_contract.py \
+    tests/test_sqlalchemy_property_candidate_provider.py \
+    tests/test_building_resolution_service.py \
+    tests/test_building_persistence_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalizer_interface.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then run:
+
+git diff --check
+
+
+Then run an import guardrail confirming that:
+
+backend/app/resolution/property.py
+
+does NOT import:
+
+sqlalchemy
+app.models
+app.repositories
+app.database
+app.persistence
+
+
+Also confirm no transaction/persistence calls appear in:
+
+backend/app/resolution/property.py
+
+
+Forbidden call patterns:
+
+.add(
+.flush(
+.commit(
+.rollback(
+.delete(
+.close(
+
+
+==================================================
+22. REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+
+2. exact PropertyResolutionResult contract;
+
+3. exact reason → status mapping;
+
+4. explicit confirmation that ambiguity cannot become create_required;
+
+5. exact matcher invocation behavior;
+
+6. files created/modified;
+
+7. complete contents of:
+   backend/app/resolution/property.py
+
+8. complete updated contents of:
+   backend/app/resolution/__init__.py
+
+9. complete contents of:
+   backend/tests/test_property_resolution_service.py
+
+10. optional integration test behavior if added;
+
+11. pytest result;
+
+12. git diff --check result;
+
+13. import guardrail result;
+
+14. persistence/transaction guardrail result;
+
+15. git status --short.
+
+Do not commit.
+
+Stop after reporting.
