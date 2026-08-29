@@ -1,0 +1,1120 @@
+Task #5.16 — Property Persistence Service
+
+Goal:
+Create an ORM-aware PropertyPersistenceService that applies an already-made
+PropertyResolutionResult to the database.
+
+This service must:
+
+1. reuse an existing Property when resolution.status == "matched";
+2. create exactly one Property when resolution.status == "create_required";
+3. refuse to persist when resolution.status == "ambiguous";
+4. never commit, rollback, close, or own the transaction;
+5. perform no matching or resolution logic.
+
+This task is the persistence boundary after PropertyResolutionService.
+
+
+CURRENT FLOW
+
+NormalizedListing
+      +
+building_key
+      +
+PropertyResolutionResult
+      ↓
+PropertyPersistenceService
+      ↓
+Property ORM instance
+
+
+==================================================
+1. INSPECT FIRST
+==================================================
+
+Before editing, inspect:
+
+backend/app/persistence/building.py
+backend/app/persistence/__init__.py
+
+backend/app/resolution/property.py
+backend/app/resolution/building.py
+
+backend/app/models/property.py
+backend/app/models/building.py
+
+backend/app/normalization/types.py
+
+backend/tests/test_building_persistence_service.py
+backend/tests/test_property_resolution_service.py
+
+
+Report before modifying:
+
+1. exact BuildingPersistenceService API and transaction behavior;
+2. exact Property ORM fields and nullability;
+3. exact PropertyResolutionResult fields and invariants;
+4. canonical studio contract;
+5. whether Property persistence already exists;
+6. current persistence exports;
+7. whether any Property ORM field lacks canonical input from NormalizedListing;
+8. exact expected files to create/modify.
+
+Do not modify before inspection.
+
+
+==================================================
+2. CREATE PROPERTY PERSISTENCE SERVICE
+==================================================
+
+Create:
+
+backend/app/persistence/property.py
+
+
+Implement:
+
+class PropertyPersistenceService
+
+
+Constructor:
+
+def __init__(
+    self,
+    session: Session,
+) -> None:
+    self._session = session
+
+
+Primary method:
+
+def persist(
+    self,
+    *,
+    listing: NormalizedListing,
+    building_key: str,
+    resolution: PropertyResolutionResult,
+) -> Property:
+    ...
+
+
+The method returns the ORM Property instance:
+
+- existing Property for matched;
+- newly created Property for create_required.
+
+
+==================================================
+3. RESPONSIBILITY BOUNDARY
+==================================================
+
+PropertyPersistenceService may:
+
+- parse UUID identifiers needed for ORM access;
+- load Building;
+- load Property;
+- create Property;
+- add Property;
+- flush Property.
+
+It must NOT:
+
+- perform matching;
+- instantiate PropertyMatcher;
+- invoke PropertyResolutionService;
+- inspect matcher reason beyond resolution.status;
+- perform deduplication;
+- persist Listing;
+- persist RawListing;
+- commit;
+- rollback;
+- close session;
+- create sessions;
+- manage transactions.
+
+
+==================================================
+4. INPUT CONTRACT
+==================================================
+
+Inputs:
+
+listing:
+    NormalizedListing
+
+building_key:
+    application key representing Building UUID
+
+resolution:
+    PropertyResolutionResult
+
+
+Do not mutate any input.
+
+
+==================================================
+5. BUILDING KEY VALIDATION
+==================================================
+
+Validate:
+
+building_key must be:
+
+- str;
+- non-empty after strip;
+- valid UUID.
+
+
+Invalid value must raise ValueError containing:
+
+building_key
+
+
+Examples:
+
+""
+"   "
+"not-a-uuid"
+
+
+Do not query the session when building_key validation fails.
+
+
+==================================================
+6. BUILDING EXISTENCE
+==================================================
+
+Parse:
+
+building_id = UUID(building_key)
+
+
+Load:
+
+building = self._session.get(Building, building_id)
+
+
+If Building does not exist:
+
+raise ValueError containing:
+
+building_key
+
+
+Example message:
+
+raise ValueError(
+    f"Building not found for building_key: {building_key}"
+)
+
+
+This check applies before creating a Property.
+
+
+For matched resolution, inspect BuildingPersistenceService behavior and choose
+the minimal consistent approach.
+
+Preferred rule:
+
+- validate building_key;
+- ensure Building exists;
+- then resolve/load Property.
+
+Do not silently create Building here.
+
+
+==================================================
+7. MATCHED STATUS
+==================================================
+
+If:
+
+resolution.status == "matched"
+
+
+Then:
+
+1. resolution.property_key must already be non-empty by its own invariant;
+2. parse property_key as UUID;
+3. invalid UUID raises ValueError containing:
+
+property_key
+
+4. load:
+
+property_row = self._session.get(Property, property_id)
+
+5. if missing:
+
+raise ValueError containing:
+
+property_key
+
+6. verify:
+
+property_row.building_id == building_id
+
+
+If the matched Property belongs to a different Building:
+
+raise ValueError containing both:
+
+property_key
+building_key
+
+
+This is an important persistence safety guardrail.
+
+
+Do NOT:
+
+- mutate the Property;
+- overwrite fields from listing;
+- add Property;
+- flush;
+- commit.
+
+
+Return the existing ORM Property unchanged.
+
+
+==================================================
+8. CREATE_REQUIRED STATUS
+==================================================
+
+If:
+
+resolution.status == "create_required"
+
+
+Create exactly one Property using canonical listing data.
+
+
+Required mapping:
+
+Property(
+    building_id=building_id,
+    floor=listing["floor"],
+    rooms=listing["rooms"],
+    area_total=listing["area_sqm"],
+    is_studio=listing["is_studio"],
+)
+
+
+Inspect Property model for any additional required fields.
+
+If any other Property fields are NOT NULL without defaults:
+
+STOP and report instead of inventing values.
+
+
+Do not populate fields that are not represented canonically unless required by
+the ORM schema.
+
+
+==================================================
+9. OPTIONAL PROPERTY FIELDS
+==================================================
+
+Inspect:
+
+Property.area_living
+Property.area_kitchen
+
+
+If nullable:
+
+leave them as None/default.
+
+Do NOT infer them from total area.
+
+Do NOT invent data.
+
+
+==================================================
+10. CANONICAL STUDIO CONTRACT
+==================================================
+
+Persistence must accept the canonical representation established in Task #5.14:
+
+Studio:
+
+rooms=0
+is_studio=True
+
+
+Non-studio:
+
+rooms>=1
+is_studio=False
+
+
+Do NOT convert:
+
+0 -> None
+None -> 0
+0 -> 1
+1 -> 0
+
+
+Do NOT add studio-specific transformation logic.
+
+Normalization already owns canonicalization.
+
+
+==================================================
+11. ADD AND FLUSH
+==================================================
+
+For create_required only:
+
+self._session.add(property_row)
+self._session.flush()
+
+
+Then return:
+
+property_row
+
+
+Do NOT call:
+
+commit()
+rollback()
+close()
+
+
+Transaction ownership belongs to higher-level orchestration.
+
+
+==================================================
+12. AMBIGUOUS STATUS
+==================================================
+
+If:
+
+resolution.status == "ambiguous"
+
+
+Raise ValueError before any write operation.
+
+
+Error must contain:
+
+ambiguous
+
+
+Example:
+
+raise ValueError(
+    "Cannot persist Property from ambiguous resolution"
+)
+
+
+CRITICAL:
+
+For ambiguous resolution:
+
+- no Property creation;
+- no add;
+- no flush;
+- no commit;
+- no mutation.
+
+
+Prefer failing before any unnecessary database write.
+
+It is acceptable to validate pure input values before the status branch, but
+do not create or write anything.
+
+
+==================================================
+13. UNKNOWN STATUS
+==================================================
+
+PropertyResolutionResult already validates status.
+
+Do not add speculative fallback logic.
+
+Still fail closed if somehow unsupported state reaches persistence.
+
+
+==================================================
+14. MATCHED PROPERTY OWNERSHIP GUARD
+==================================================
+
+This is required.
+
+Scenario:
+
+building_key references Building A
+
+resolution.property_key references Property belonging to Building B
+
+
+Persistence must reject this.
+
+Never return a Property from another Building even if the matcher/resolution
+layer somehow supplied that key.
+
+
+Expected:
+
+ValueError
+
+
+No writes.
+
+
+==================================================
+15. LISTING VALIDATION
+==================================================
+
+Do not duplicate all NormalizedListing validation.
+
+NormalizedListing is already canonical application data.
+
+However, persistence may rely on:
+
+listing["floor"]
+listing["rooms"]
+listing["area_sqm"]
+listing["is_studio"]
+
+
+Do not add a second normalization system here.
+
+
+==================================================
+16. AREA MAPPING
+==================================================
+
+Property.area_total is backed by:
+
+Numeric(8, 2)
+
+
+NormalizedListing.area_sqm is float.
+
+
+Inspect existing model conventions.
+
+Preferred mapping:
+
+area_total=listing["area_sqm"]
+
+
+Let SQLAlchemy/PostgreSQL Numeric binding handle persistence representation.
+
+Do NOT introduce new rounding policy in this task unless the existing ORM or
+tests already require it.
+
+
+Do not use price/money Decimal rules for area.
+
+
+==================================================
+17. RETURN CONTRACT
+==================================================
+
+persist(...) -> Property
+
+
+Matched:
+
+returns existing Property object loaded from the injected Session.
+
+
+Create_required:
+
+returns newly constructed/flushed Property object.
+
+
+Ambiguous:
+
+raises ValueError.
+
+
+==================================================
+18. SESSION OWNERSHIP
+==================================================
+
+Injected Session only.
+
+Do NOT:
+
+Session(...)
+sessionmaker(...)
+get_db(...)
+create_engine(...)
+
+
+Do not close injected session.
+
+
+==================================================
+19. PUBLIC EXPORT
+==================================================
+
+Modify:
+
+backend/app/persistence/__init__.py
+
+
+Preserve existing:
+
+BuildingPersistenceService
+
+
+Add:
+
+PropertyPersistenceService
+
+
+Expected conceptually:
+
+from .building import BuildingPersistenceService
+from .property import PropertyPersistenceService
+
+
+==================================================
+20. TEST FILE
+==================================================
+
+Create:
+
+backend/tests/test_property_persistence_service.py
+
+
+Prefer database-free tests using a FakeSession similar to:
+
+backend/tests/test_building_persistence_service.py
+
+
+The fake should record:
+
+get calls
+add calls
+flush calls
+commit calls
+rollback calls
+close calls
+
+
+No live PostgreSQL required.
+
+
+==================================================
+21. TEST HELPERS
+==================================================
+
+Create helper canonical listings.
+
+
+Normal apartment example:
+
+rooms=2
+is_studio=False
+area_sqm=55.5
+floor=5
+
+
+Studio example:
+
+rooms=0
+is_studio=True
+area_sqm=27.4
+floor=8
+
+
+Use real UUID objects for ORM identities.
+
+
+==================================================
+22. REQUIRED MATCHED TESTS
+==================================================
+
+TEST 1 — matched returns existing Property
+
+
+Given:
+
+valid building_key
+valid property_key
+Building exists
+Property exists
+Property.building_id == Building.id
+
+Expected:
+
+same Property object returned.
+
+
+TEST 2 — matched performs no add
+
+
+TEST 3 — matched performs no flush
+
+
+TEST 4 — matched does not mutate existing Property
+
+
+Use a snapshot or explicit field assertions.
+
+
+TEST 5 — matched invalid property_key UUID rejected
+
+
+Expected:
+
+ValueError containing "property_key"
+
+
+TEST 6 — matched missing Property rejected
+
+
+TEST 7 — matched Property belonging to another Building rejected
+
+
+Expected:
+
+ValueError containing property_key/building_key or clear ownership message.
+
+
+TEST 8 — matched does not overwrite Property fields from listing
+
+
+Example:
+
+Existing ORM:
+
+floor=3
+rooms=1
+area_total=Decimal("40.00")
+
+Incoming listing:
+
+floor=5
+rooms=2
+area_sqm=55.5
+
+
+Expected:
+
+existing Property remains unchanged.
+
+
+==================================================
+23. REQUIRED CREATE TESTS
+==================================================
+
+TEST 9 — create_required creates one Property
+
+
+Expected mapping:
+
+building_id == parsed building UUID
+floor == listing["floor"]
+rooms == listing["rooms"]
+area_total corresponds to listing["area_sqm"]
+is_studio == listing["is_studio"]
+
+
+TEST 10 — created Property is added exactly once
+
+
+TEST 11 — created Property is flushed exactly once
+
+
+TEST 12 — created Property is returned
+
+
+TEST 13 — nullable floor preserved
+
+
+listing:
+
+floor=None
+
+
+Expected:
+
+Property.floor is None
+
+
+TEST 14 — studio persists canonical rooms=0
+
+
+listing:
+
+rooms=0
+is_studio=True
+
+
+Expected:
+
+Property.rooms == 0
+Property.is_studio is True
+
+
+TEST 15 — non-studio rooms preserved
+
+
+listing:
+
+rooms=3
+is_studio=False
+
+
+Expected:
+
+rooms == 3
+
+
+TEST 16 — area_total comes from area_sqm
+
+
+No alternative area inference.
+
+
+==================================================
+24. BUILDING VALIDATION TESTS
+==================================================
+
+TEST 17 — empty building_key rejected without session query
+
+
+TEST 18 — whitespace building_key rejected without session query
+
+
+TEST 19 — malformed UUID building_key rejected without session query
+
+
+TEST 20 — valid UUID but missing Building rejected
+
+
+Expected:
+
+ValueError containing building_key
+
+
+TEST 21 — missing Building causes no writes
+
+
+No add.
+No flush.
+
+
+==================================================
+25. AMBIGUITY TESTS
+==================================================
+
+TEST 22 — ambiguous resolution raises
+
+
+Expected:
+
+ValueError containing "ambiguous"
+
+
+TEST 23 — ambiguous performs no add
+
+
+TEST 24 — ambiguous performs no flush
+
+
+TEST 25 — ambiguous never creates Property
+
+
+==================================================
+26. TRANSACTION GUARDRAIL TESTS
+==================================================
+
+For both matched and create_required:
+
+assert:
+
+commit_calls == 0
+rollback_calls == 0
+close_calls == 0
+
+
+For ambiguous also confirm:
+
+commit_calls == 0
+rollback_calls == 0
+close_calls == 0
+
+
+==================================================
+27. INPUT IMMUTABILITY
+==================================================
+
+TEST 26 — listing is not mutated
+
+
+TEST 27 — resolution is immutable already; ensure persistence does not replace
+or modify it.
+
+
+==================================================
+28. SESSION GET BEHAVIOR
+==================================================
+
+FakeSession should support:
+
+session.get(Building, building_id)
+session.get(Property, property_id)
+
+
+Record calls so tests can verify expected lookups.
+
+
+For create_required:
+
+Expected:
+
+Building lookup required.
+
+Property lookup not required because resolution already decided creation.
+
+
+Do NOT query candidates again.
+
+
+==================================================
+29. NO MATCHING OR RESOLUTION CALLS
+==================================================
+
+PropertyPersistenceService must not import or instantiate:
+
+PropertyMatcher
+ConservativePropertyMatcher
+PropertyResolutionService
+PropertyCandidateProvider
+
+
+It only consumes:
+
+PropertyResolutionResult
+
+
+==================================================
+30. FILE SCOPE
+==================================================
+
+Create only:
+
+backend/app/persistence/property.py
+backend/tests/test_property_persistence_service.py
+
+
+Modify only:
+
+backend/app/persistence/__init__.py
+
+
+Do NOT modify:
+
+backend/app/models/*
+backend/app/matching/*
+backend/app/resolution/*
+backend/app/normalization/*
+backend/app/repositories/*
+backend/scripts/*
+alembic/*
+requirements/dependencies
+
+
+If inspection finds a required model/schema change:
+
+STOP and report before modifying schema.
+
+
+==================================================
+31. IMPLEMENTATION STYLE
+==================================================
+
+Follow the style and structure of:
+
+backend/app/persistence/building.py
+
+
+Prefer small explicit private helpers if they improve readability, e.g.:
+
+_parse_uuid(...)
+_load_building(...)
+_load_property(...)
+
+
+But do not over-engineer.
+
+
+Avoid introducing generic repository abstractions in this task.
+
+
+==================================================
+32. ARCHITECTURAL GUARDRAILS
+==================================================
+
+backend/app/persistence/property.py MAY import:
+
+sqlalchemy.orm.Session
+app.models.property
+app.models.building
+app.normalization.types
+app.resolution.property
+
+
+It must NOT import:
+
+app.matching
+app.repositories
+app.database
+
+
+It must NOT contain:
+
+.commit(
+.rollback(
+.close(
+
+
+It may contain:
+
+.add(
+.flush(
+
+
+==================================================
+33. VALIDATION
+==================================================
+
+Run:
+
+pytest \
+    tests/test_property_persistence_service.py \
+    tests/test_property_resolution_service.py \
+    tests/test_conservative_property_matcher.py \
+    tests/test_property_matcher_contract.py \
+    tests/test_sqlalchemy_property_candidate_provider.py \
+    tests/test_building_persistence_service.py \
+    tests/test_building_resolution_service.py \
+    tests/test_building_matcher_contract.py \
+    tests/test_exact_building_matcher.py \
+    tests/test_sqlalchemy_building_candidate_provider.py \
+    tests/test_mock_normalizer.py \
+    tests/test_normalizer_interface.py \
+    tests/test_normalization_service.py \
+    tests/test_ingestion_pipeline.py \
+    tests/test_source_adapter.py \
+    -q
+
+
+Then:
+
+git diff --check
+
+
+==================================================
+34. IMPORT GUARDRAIL
+==================================================
+
+Confirm:
+
+backend/app/persistence/property.py
+
+does NOT import:
+
+app.matching
+app.repositories
+app.database
+
+
+SQLAlchemy and ORM model imports are expected here.
+
+
+==================================================
+35. TRANSACTION GUARDRAIL
+==================================================
+
+Confirm source does not contain:
+
+.commit(
+.rollback(
+.close(
+
+
+Confirm:
+
+.add(
+.flush(
+
+are only used in the create_required branch.
+
+
+==================================================
+36. SCHEMA GUARDRAIL
+==================================================
+
+Confirm:
+
+git diff -- backend/app/models alembic
+
+
+produces no changes.
+
+
+No migration is expected.
+
+
+==================================================
+37. REPORT
+==================================================
+
+Return:
+
+1. inspection findings;
+
+2. exact PropertyPersistenceService API;
+
+3. matched behavior;
+
+4. create_required behavior;
+
+5. ambiguous behavior;
+
+6. Building validation behavior;
+
+7. matched Property ownership guard behavior;
+
+8. studio persistence behavior;
+
+9. transaction ownership behavior;
+
+10. exact files created/modified;
+
+11. complete contents of:
+    backend/app/persistence/property.py
+
+12. complete updated contents of:
+    backend/app/persistence/__init__.py
+
+13. complete contents of:
+    backend/tests/test_property_persistence_service.py
+
+14. pytest result;
+
+15. git diff --check result;
+
+16. import guardrail result;
+
+17. transaction guardrail result;
+
+18. schema guardrail result;
+
+19. git status --short.
+
+Do not commit.
+
+Stop after reporting.
