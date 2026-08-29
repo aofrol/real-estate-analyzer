@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.collector.base import Collector
 from app.models.listing import Listing
+from app.models.listing_price_history import ListingPriceHistory
 from app.normalization.types import NormalizedListing
 from app.persistence import ListingPersistenceService, ListingPriceHistoryService
 from app.repositories.raw_listing import RawListingRepository
+
+
+@dataclass(frozen=True, slots=True)
+class ListingPersistenceOrchestrationResult:
+    """Persisted Listing plus an optional price transition row."""
+
+    listing: Listing
+    price_history: ListingPriceHistory | None
 
 
 class ListingPersistenceOrchestrator:
@@ -44,6 +54,20 @@ class ListingPersistenceOrchestrator:
         The injected persistence services must share the caller's Session.  This
         method deliberately does not commit, roll back, or close that session.
         """
+        return self.persist_with_history(
+            source_key=source_key,
+            property_key=property_key,
+            listing=listing,
+        ).listing
+
+    def persist_with_history(
+        self,
+        *,
+        source_key: str,
+        property_key: str,
+        listing: NormalizedListing,
+    ) -> ListingPersistenceOrchestrationResult:
+        """Persist one Listing and expose the history row created for it."""
         existing = self._listing_persistence.find_existing(
             source_key=source_key,
             external_id=listing.get("external_id"),
@@ -57,16 +81,20 @@ class ListingPersistenceOrchestrator:
             listing=listing,
         )
 
+        price_history = None
         if existing is not None and previous_price != new_price:
             if previous_price is None:
                 raise ValueError("existing Listing must have an asking price")
-            self._price_history.record_change(
+            price_history = self._price_history.record_change(
                 listing=persisted_listing,
                 previous_price_kopecks=previous_price,
                 new_price_kopecks=new_price,
             )
 
-        return persisted_listing
+        return ListingPersistenceOrchestrationResult(
+            listing=persisted_listing,
+            price_history=price_history,
+        )
 
     def persist_listing(
         self,

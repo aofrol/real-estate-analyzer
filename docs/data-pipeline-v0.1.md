@@ -44,13 +44,23 @@ Comparable Engine
 
 ### Raw data is immutable
 
-Таблица `raw_listings` является неизменяемым журналом входящих данных.
+Таблица `raw_listings` хранит неизменяемый raw payload для текущей source
+identity.
 
 После сохранения:
 
 - `raw_data` не изменяется;
 - сохраняется внешний идентификатор источника;
 - сохраняется время получения данных.
+
+В текущем MVP `(source_id, external_id)` уникален. Поэтому `raw_listings`
+содержит одну строку на source listing identity, а не append-only журнал каждой
+повторной выгрузки. Повторные изменения цены представлены через current-state
+`Listing` и append-only `ListingPriceHistory`.
+
+Если в будущем потребуются исторические raw snapshots, нужен отдельный
+observation/version model. Текущая схема в рамках processing pipeline не
+меняется.
 
 ---
 
@@ -184,7 +194,54 @@ Worker-facing `persist_refreshed_listing()` использует эту boundary
 
 ---
 
-## 8. Normalization Strategy
+## 8. Application Listing Processing Pipeline
+
+`ListingProcessingPipeline` связывает уже существующие application boundaries
+для одного raw source observation:
+
+```text
+RawListing
+        ↓
+NormalizationService
+        ↓
+BuildingResolutionService
+        ↓
+BuildingPersistenceService
+        ↓
+PropertyResolutionService
+        ↓
+PropertyPersistenceService
+        ↓
+ListingPersistenceOrchestrator
+        ├── Listing current state
+        └── ListingPriceHistory
+```
+
+Authoritative source identity передаётся pipeline отдельно как `source_key`.
+Authoritative `external_id` передаётся отдельно от `raw_data`; значение
+`external_id` внутри raw payload не определяет identity. Для persisted
+`RawListing` caller передаёт его `external_id` и неизменяемую копию `raw_data`.
+Повторный fixture с той же source identity может содержать новый raw payload,
+не переписывая сохранённую строку `raw_listings`.
+
+Building и Property resolution используют существующие matchers. Unique exact
+match переиспользуется, отсутствие безопасного match приводит к созданию, а
+ambiguity завершается ошибкой до downstream persistence.
+
+`ListingPersistenceOrchestrator` остаётся единственным владельцем Listing
+identity lookup, current-price update и решения о создании price-history row.
+Сам pipeline не реализует price comparison и не создаёт
+`ListingPriceHistory` напрямую.
+
+SQLAlchemy Session и enclosing transaction принадлежат caller. Pipeline и все
+вызванные сервисы могут выполнять `flush()`, но не вызывают `commit()`,
+`rollback()` или `close()`.
+
+Cross-source duplicate detection и scheduled refresh не входят в этот pipeline.
+
+---
+
+## 9. Normalization Strategy
 
 ```text
 RawListing
@@ -230,7 +287,7 @@ MVP identity matching основан на:
 
 ---
 
-## 9. Data Ownership
+## 10. Data Ownership
 
 | Layer | Owner | Storage |
 |------|------|---------|
@@ -241,7 +298,7 @@ MVP identity matching основан на:
 
 ---
 
-## 10. Current Implementation Status
+## 11. Current Implementation Status
 
 ### Completed
 
@@ -259,6 +316,7 @@ MVP identity matching основан на:
 - `SQLAlchemyRawListingRepository`;
 - `IngestionService`;
 - `ListingPersistenceOrchestrator`;
+- `ListingProcessingPipeline`;
 - worker-facing normalized Listing persistence boundary;
 - ingestion pipeline tests.
 
@@ -269,7 +327,7 @@ MVP identity matching основан на:
 
 ---
 
-## 11. Out of Scope
+## 12. Out of Scope
 
 Task #4 не включает:
 
